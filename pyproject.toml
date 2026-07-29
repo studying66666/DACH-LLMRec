@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dach-llmrec"
+version = "0.1.0"
+description = "Health-factor extensible DACH-LLMRec prototype for ingredient and recipe recommendation."
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.0",
+  "numpy>=1.24",
+  "scikit-learn>=1.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+dach-llmrec = "dach_llmrec.recommender:main"
+dach-llmrec-bpr = "dach_llmrec.bpr:main"
+dach-llmrec-demo-data = "dach_llmrec.demo_data:main"
+dach-llmrec-evaluate = "dach_llmrec.evaluate:main"
+
+[tool.setuptools.packages.find]
+include = ["dach_llmrec*"]
