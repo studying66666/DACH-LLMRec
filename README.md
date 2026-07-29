@@ -47,6 +47,8 @@ D:\Documents\推荐算法\handoff_database_completed_20260729\dietrecommendation
 
 ## 2. 算法总体思路
 
+完整算法设计、打分公式、实现状态和暂未实现的功能见 [docs/ALGORITHM.md](docs/ALGORITHM.md)。
+
 推荐流程如下：
 
 ```text
