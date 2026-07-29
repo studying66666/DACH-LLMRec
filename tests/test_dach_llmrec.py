@@ -1,6 +1,7 @@
 from dach_llmrec import DACHLLMRecommender
 from dach_llmrec.bpr import train_bpr
 from dach_llmrec.demo_data import create_demo_database
+from dach_llmrec.experiments.run_all import run_all
 
 
 def _demo_db(tmp_path):
@@ -65,3 +66,22 @@ def test_bpr_training_artifact_can_be_loaded(tmp_path):
         assert len(result["items"]) == 3
     finally:
         recommender.close()
+
+
+def test_run_all_demo_experiment_writes_outputs(tmp_path):
+    output_dir = tmp_path / "experiment"
+    result = run_all(
+        db_path=None,
+        output_dir=output_dir,
+        use_demo_data=True,
+        device="cpu",
+        bpr_epochs=1,
+        bpr_dim=8,
+        bpr_batch_size=8,
+        top_k=3,
+        max_users=3,
+    )
+    assert (output_dir / "experiment.json").exists()
+    assert (output_dir / "metrics.csv").exists()
+    assert "dach_full" in result["evaluation"]["results"]
+    assert "content" in result["evaluation"]["results"]

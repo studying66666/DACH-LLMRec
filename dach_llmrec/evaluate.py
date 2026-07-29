@@ -8,7 +8,9 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from .recommender import DEFAULT_DB_PATH, DACHLLMRecommender, FEEDBACK_WEIGHTS
+from .constants import FEEDBACK_WEIGHTS
+from .paths import DEFAULT_DB_PATH
+from .recommender import DACHLLMRecommender
 
 
 POSITIVE_EVENTS = {"click", "save", "cook"}
@@ -20,6 +22,7 @@ def evaluate(
     top_k: int = 10,
     max_users: int | None = 50,
     bpr_model_path: str | Path | None = None,
+    rankers: list[str] | None = None,
 ) -> dict[str, Any]:
     """Evaluate on synthetic feedback after cutoff.
 
@@ -29,11 +32,6 @@ def evaluate(
     """
 
     db_path = Path(db_path)
-    recommender = DACHLLMRecommender(
-        db_path,
-        feedback_before=cutoff,
-        bpr_model_path=bpr_model_path,
-    )
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
@@ -42,22 +40,38 @@ def evaluate(
         if max_users is not None:
             user_ids = user_ids[:max_users]
         popularity = _training_popularity(conn, cutoff)
-
-        dach_metrics = _evaluate_ranker(
-            recommender=recommender,
-            user_ids=user_ids,
-            test_positives=test_positives,
-            top_k=top_k,
-            ranker="dach",
-        )
-        popularity_metrics = _evaluate_ranker(
-            recommender=recommender,
-            user_ids=user_ids,
-            test_positives=test_positives,
-            top_k=top_k,
-            ranker="popularity",
-            popularity=popularity,
-        )
+        rankers = rankers or [
+            "popularity",
+            "content",
+            "bpr_only",
+            "dach_no_health",
+            "dach_no_llm",
+            "dach_no_feedback",
+            "dach_no_diversity",
+            "dach_full",
+        ]
+        results = {}
+        for ranker in rankers:
+            if ranker == "bpr_only" and not bpr_model_path:
+                results[ranker] = {"skipped": True, "reason": "bpr_model_path is required"}
+                continue
+            recommender = DACHLLMRecommender(
+                db_path,
+                feedback_before=cutoff,
+                bpr_model_path=bpr_model_path if ranker in {"bpr_only", "dach_full", "dach_no_health", "dach_no_llm", "dach_no_feedback", "dach_no_diversity"} else None,
+                disabled_components=_disabled_components_for_ranker(ranker),
+            )
+            try:
+                results[ranker] = _evaluate_ranker(
+                    recommender=recommender,
+                    user_ids=user_ids,
+                    test_positives=test_positives,
+                    top_k=top_k,
+                    ranker=ranker,
+                    popularity=popularity,
+                )
+            finally:
+                recommender.close()
         return {
             "metadata": {
                 "database": str(db_path),
@@ -67,12 +81,10 @@ def evaluate(
                 "bpr_model": str(bpr_model_path) if bpr_model_path else None,
                 "boundary": "synthetic feedback simulation; not real-user validation",
             },
-            "dach_llmrec": dach_metrics,
-            "popularity_baseline": popularity_metrics,
+            "results": results,
         }
     finally:
         conn.close()
-        recommender.close()
 
 
 def _load_test_positives(conn: sqlite3.Connection, cutoff: str) -> dict[int, set[int]]:
@@ -133,8 +145,15 @@ def _evaluate_ranker(
         if ranker == "dach":
             items = recommender.recommend(user_id=user_id, top_k=top_k, mode="recipe")["items"]
             rec_ids = [item["item_id"] for item in items]
-        else:
+        elif ranker == "popularity":
             rec_ids = _popularity_for_user(recommender, user_id, popularity or [], top_k)
+        elif ranker == "content":
+            rec_ids = _content_for_user(recommender, user_id, top_k)
+        elif ranker == "bpr_only":
+            rec_ids = _bpr_only_for_user(recommender, user_id, top_k)
+        else:
+            items = recommender.recommend(user_id=user_id, top_k=top_k, mode="recipe")["items"]
+            rec_ids = [item["item_id"] for item in items]
 
         hits = [recipe_id for recipe_id in rec_ids if recipe_id in positives]
         precision_values.append(len(hits) / max(len(rec_ids), 1))
@@ -144,9 +163,7 @@ def _evaluate_ranker(
         catalog_hits.update(rec_ids)
         returned += len(rec_ids)
         diversity_values.append(_intra_list_diversity(recommender, rec_ids))
-        safety_violations += len(
-            recommender.validate(user_id=user_id, top_k=len(rec_ids))["violations"]
-        ) if ranker == "dach" else 0
+        safety_violations += _safety_violations_for_rec_ids(recommender, user_id, rec_ids)
 
     total_recipes = max(len(recommender.recipes), 1)
     return {
@@ -158,6 +175,16 @@ def _evaluate_ranker(
         "diversity": _mean(diversity_values),
         "safety_violation_rate": safety_violations / max(returned, 1),
     }
+
+
+def _disabled_components_for_ranker(ranker: str) -> set[str]:
+    mapping = {
+        "dach_no_health": {"health"},
+        "dach_no_llm": {"llm"},
+        "dach_no_feedback": {"feedback"},
+        "dach_no_diversity": {"diversity"},
+    }
+    return mapping.get(ranker, set())
 
 
 def _popularity_for_user(
@@ -174,6 +201,65 @@ def _popularity_for_user(
         if len(rec_ids) >= top_k:
             break
     return rec_ids
+
+
+def _content_for_user(
+    recommender: DACHLLMRecommender,
+    user_id: int,
+    top_k: int,
+) -> list[int]:
+    profile = recommender._load_user_profile(user_id)
+    scored = []
+    for recipe_id, recipe in recommender.recipes.items():
+        if not recommender._passes_recipe_filters(recipe_id, profile, []):
+            continue
+        evidence = recommender._recipe_evidence(profile, recipe_id, [])
+        score = (
+            0.45 * evidence["preference_score"]
+            + 0.35 * evidence["content_score"]
+            + 0.20 * evidence["quality_score"]
+        )
+        scored.append((recipe_id, score))
+    scored.sort(key=lambda item: item[1], reverse=True)
+    return [recipe_id for recipe_id, _ in scored[:top_k]]
+
+
+def _bpr_only_for_user(
+    recommender: DACHLLMRecommender,
+    user_id: int,
+    top_k: int,
+) -> list[int]:
+    if recommender.bpr_scorer is None:
+        return []
+    profile = recommender._load_user_profile(user_id)
+    scored = []
+    for recipe_id in recommender.recipes:
+        if not recommender._passes_recipe_filters(recipe_id, profile, []):
+            continue
+        score = recommender.bpr_scorer.score(user_id, recipe_id)
+        if score is not None:
+            scored.append((recipe_id, score))
+    scored.sort(key=lambda item: item[1], reverse=True)
+    return [recipe_id for recipe_id, _ in scored[:top_k]]
+
+
+def _safety_violations_for_rec_ids(
+    recommender: DACHLLMRecommender,
+    user_id: int,
+    rec_ids: list[int],
+) -> int:
+    profile = recommender._load_user_profile(user_id)
+    violations = 0
+    for recipe_id in rec_ids:
+        recipe = recommender.recipes[recipe_id]
+        ingredients = set(recommender.recipe_ingredients.get(recipe_id, {}))
+        if recipe.recommendable != 1:
+            violations += 1
+        if recipe_id in profile.avoided_recipes:
+            violations += 1
+        if ingredients & profile.avoided_ingredients:
+            violations += 1
+    return violations
 
 
 def _ndcg(rec_ids: list[int], positives: set[int], top_k: int) -> float:
@@ -219,6 +305,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-users", type=int, default=50)
     parser.add_argument("--bpr-model", default=None, help="Optional trained BPR .pt artifact")
     parser.add_argument("--output", default=None, help="Optional JSON output path")
+    parser.add_argument(
+        "--rankers",
+        default=None,
+        help="Comma-separated rankers. Defaults to all baselines and ablations.",
+    )
     args = parser.parse_args(argv)
     output = evaluate(
         db_path=args.db,
@@ -226,6 +317,7 @@ def main(argv: list[str] | None = None) -> int:
         top_k=args.top_k,
         max_users=args.max_users,
         bpr_model_path=args.bpr_model,
+        rankers=args.rankers.split(",") if args.rankers else None,
     )
     if args.output:
         output_path = Path(args.output)

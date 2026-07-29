@@ -1,5 +1,6 @@
 """DACH-LLMRec recommendation prototype."""
 
-from .recommender import DACHLLMRecommender, HashEmbeddingProvider
+from .embeddings import HashEmbeddingProvider
+from .recommender import DACHLLMRecommender
 
 __all__ = ["DACHLLMRecommender", "HashEmbeddingProvider"]

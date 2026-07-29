@@ -13,7 +13,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .recommender import DEFAULT_DB_PATH, FEEDBACK_WEIGHTS
+from .constants import FEEDBACK_WEIGHTS
+from .paths import DEFAULT_DB_PATH
 
 
 POSITIVE_EVENTS = {"click", "save", "cook"}

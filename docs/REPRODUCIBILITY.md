@@ -112,6 +112,18 @@ python -m dach_llmrec.cli --user-id 1 --top-k 5 --mode ingredient --bpr-model ar
 python -m dach_llmrec.evaluate --cutoff "2026-06-01 00:00:00" --top-k 10 --max-users 500 --bpr-model artifacts/dach_bpr_gpu.pt --output artifacts/dach_bpr_gpu_eval.json
 ```
 
+一键实验，包括训练 BPR、运行 baseline 和消融实验、保存 `experiment.json`、`metrics.csv`、`config.json`：
+
+```bash
+python -m dach_llmrec.experiments.run_all --db handoff_database_completed_20260729/dietrecommendation_no_empty_enhanced.sqlite --output-dir artifacts/experiment_001 --device cuda --bpr-epochs 20 --bpr-dim 64 --top-k 10 --max-users 500
+```
+
+demo 数据一键实验：
+
+```bash
+python -m dach_llmrec.experiments.run_all --demo --output-dir artifacts/demo_experiment --device cpu --bpr-epochs 1 --bpr-dim 8 --top-k 3 --max-users 3
+```
+
 指标包括：
 
 ```text
@@ -122,6 +134,19 @@ HitRate@K
 Coverage
 Diversity
 SafetyViolationRate
+```
+
+默认比较：
+
+```text
+popularity
+content
+bpr_only
+dach_no_health
+dach_no_llm
+dach_no_feedback
+dach_no_diversity
+dach_full
 ```
 
 注意：当前评估基于 `norm_synthetic_feedback_event_v1`，只能表述为模拟用户实验，不能表述为真实用户验证。

@@ -1,149 +1,23 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import sqlite3
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Protocol
+from typing import Any
 
-
-def _default_db_path() -> Path:
-    project_root = Path(__file__).resolve().parents[1]
-    candidates = [
-        project_root
-        / "handoff_database_completed_20260729"
-        / "dietrecommendation_no_empty_enhanced.sqlite",
-        project_root.parent
-        / "handoff_database_completed_20260729"
-        / "dietrecommendation_no_empty_enhanced.sqlite",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return candidates[0]
-
-
-DEFAULT_DB_PATH = _default_db_path()
-
-
-FEEDBACK_WEIGHTS = {
-    "cook": 5.0,
-    "save": 4.0,
-    "click": 2.0,
-    "impression": 0.5,
-    "skip": -1.0,
-    "dislike": -4.0,
-}
-
-
-RECIPE_WEIGHTS = {
-    "preference": 0.22,
-    "health_goal": 0.22,
-    "content": 0.16,
-    "feedback": 0.15,
-    "llm_alignment": 0.10,
-    "quality": 0.10,
-    "diversity": 0.05,
-}
-
-
-RECIPE_WEIGHTS_WITH_DISEASE = {
-    "preference": 0.18,
-    "health_goal": 0.18,
-    "disease": 0.16,
-    "content": 0.14,
-    "feedback": 0.12,
-    "llm_alignment": 0.10,
-    "quality": 0.08,
-    "diversity": 0.04,
-}
-
-
-CONTENT_STATUS_SCORE = {
-    "complete": 1.0,
-    "partial": 0.6,
-    "sparse": 0.3,
-}
-
-
-NUTRITION_TIER_SCORE = {
-    "standard": 1.0,
-    "sensitivity_only": 0.6,
-    "exclude_from_nutrition_model": 0.2,
-}
-
-
-class EmbeddingProvider(Protocol):
-    """Interface for replacing deterministic local embeddings with real LLM embeddings."""
-
-    def embed(self, text: str) -> list[float]:
-        """Return a dense vector for text."""
-
-
-class HashEmbeddingProvider:
-    """Deterministic offline text embedding fallback.
-
-    This is not a real LLM embedding model. It provides a stable vectorization
-    interface so the recommender can be tested without network or API keys.
-    Replace this provider with a real embedding client for production or paper
-    experiments that claim LLM semantic embeddings.
-    """
-
-    def __init__(self, dim: int = 128) -> None:
-        self.dim = dim
-
-    def embed(self, text: str) -> list[float]:
-        vec = [0.0] * self.dim
-        for token in _text_features(text):
-            digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
-            bucket = int.from_bytes(digest[:4], "little") % self.dim
-            sign = 1.0 if digest[4] % 2 == 0 else -1.0
-            vec[bucket] += sign
-        norm = math.sqrt(sum(v * v for v in vec))
-        if norm == 0:
-            return vec
-        return [v / norm for v in vec]
-
-
-@dataclass(frozen=True)
-class Recipe:
-    recipe_id: int
-    name: str
-    description: str
-    cuisine_name: str
-    cooking_methods: tuple[str, ...]
-    taste_tags: tuple[str, ...]
-    content_status: str
-    recommendable: int
-    restriction_reasons: str
-
-
-@dataclass(frozen=True)
-class Ingredient:
-    ingredient_id: int
-    name: str
-    foodtype_id: int | None
-    nutrition_status: str
-    source_status: str
-
-
-@dataclass
-class UserProfile:
-    user_id: int
-    age_years: int | None = None
-    sex: str = ""
-    activity_level: str = ""
-    diet_goal: str = ""
-    taste_preferences: dict[int, float] = field(default_factory=dict)
-    health_goals: dict[int, float] = field(default_factory=dict)
-    sport_summary: str = ""
-    favored_ingredients: dict[int, float] = field(default_factory=dict)
-    avoided_ingredients: set[int] = field(default_factory=set)
-    avoided_recipes: set[int] = field(default_factory=set)
+from .constants import (
+    CONTENT_STATUS_SCORE,
+    FEEDBACK_WEIGHTS,
+    NUTRITION_TIER_SCORE,
+    RECIPE_WEIGHTS,
+    RECIPE_WEIGHTS_WITH_DISEASE,
+)
+from .embeddings import EmbeddingProvider, HashEmbeddingProvider
+from .models import Ingredient, Recipe, UserProfile
+from .paths import DEFAULT_DB_PATH
 
 
 class DACHLLMRecommender:
@@ -160,10 +34,12 @@ class DACHLLMRecommender:
         embedding_provider: EmbeddingProvider | None = None,
         feedback_before: str | None = None,
         bpr_model_path: str | Path | None = None,
+        disabled_components: set[str] | None = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.embedding_provider = embedding_provider or HashEmbeddingProvider()
         self.feedback_before = feedback_before
+        self.disabled_components = disabled_components or set()
         self.bpr_scorer = None
         if bpr_model_path:
             from .bpr import BPRScorer
@@ -737,7 +613,25 @@ class DACHLLMRecommender:
             ),
             "quality_score": self._recipe_quality_score(recipe_id),
             "diversity_boost": 0.5,
-        }
+        } | self._disabled_evidence_overrides()
+
+    def _disabled_evidence_overrides(self) -> dict[str, float]:
+        overrides = {}
+        if "preference" in self.disabled_components:
+            overrides["preference_score"] = 0.5
+        if "health" in self.disabled_components:
+            overrides["health_goal_score"] = 0.0
+        if "content" in self.disabled_components:
+            overrides["content_score"] = 0.5
+        if "feedback" in self.disabled_components:
+            overrides["feedback_score"] = 0.5
+        if "llm" in self.disabled_components:
+            overrides["llm_alignment_score"] = 0.5
+        if "quality" in self.disabled_components:
+            overrides["quality_score"] = 0.5
+        if "diversity" in self.disabled_components:
+            overrides["diversity_boost"] = 0.5
+        return overrides
 
     def _ingredient_evidence(
         self,
@@ -898,7 +792,11 @@ class DACHLLMRecommender:
             best_index = 0
             best_score = -1.0
             for index, row in enumerate(pool):
-                diversity = self._diversity_boost(row["recipe_id"], [x["recipe_id"] for x in selected])
+                diversity = (
+                    0.5
+                    if "diversity" in self.disabled_components
+                    else self._diversity_boost(row["recipe_id"], [x["recipe_id"] for x in selected])
+                )
                 evidence = dict(row["evidence"])
                 evidence["diversity_boost"] = diversity
                 score = self._weighted_score(evidence, weights)
@@ -907,8 +805,10 @@ class DACHLLMRecommender:
                     best_score = score
             chosen = pool.pop(best_index)
             chosen["evidence"] = dict(chosen["evidence"])
-            chosen["evidence"]["diversity_boost"] = self._diversity_boost(
-                chosen["recipe_id"], [x["recipe_id"] for x in selected]
+            chosen["evidence"]["diversity_boost"] = (
+                0.5
+                if "diversity" in self.disabled_components
+                else self._diversity_boost(chosen["recipe_id"], [x["recipe_id"] for x in selected])
             )
             chosen["score"] = self._weighted_score(chosen["evidence"], weights)
             selected.append(chosen)
@@ -1124,16 +1024,6 @@ def _jaccard(left: set[Any], right: set[Any]) -> float:
     if not left and not right:
         return 0.0
     return len(left & right) / len(left | right)
-
-
-def _text_features(text: str) -> Iterable[str]:
-    normalized = text.lower()
-    for token in normalized.replace("；", " ").replace("，", " ").replace(",", " ").split():
-        yield token
-    chars = [char for char in normalized if not char.isspace()]
-    for size in (1, 2, 3):
-        for index in range(0, max(len(chars) - size + 1, 0)):
-            yield "".join(chars[index : index + size])
 
 
 def main(argv: list[str] | None = None) -> int:

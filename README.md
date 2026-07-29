@@ -87,6 +87,18 @@ python -m dach_llmrec.cli --db handoff_database_completed_20260729/dietrecommend
 python -m dach_llmrec.evaluate --db handoff_database_completed_20260729/dietrecommendation_no_empty_enhanced.sqlite --cutoff "2026-06-01 00:00:00" --top-k 10 --max-users 500 --bpr-model artifacts/dach_bpr_gpu.pt --output artifacts/dach_bpr_gpu_eval.json
 ```
 
+一键运行训练和全套 baseline/消融实验：
+
+```bash
+python -m dach_llmrec.experiments.run_all --db handoff_database_completed_20260729/dietrecommendation_no_empty_enhanced.sqlite --output-dir artifacts/experiment_001 --device cuda --bpr-epochs 20 --bpr-dim 64 --top-k 10 --max-users 500
+```
+
+没有完整数据库时可跑 demo 实验：
+
+```bash
+python -m dach_llmrec.experiments.run_all --demo --output-dir artifacts/demo_experiment --device cpu --bpr-epochs 1 --bpr-dim 8 --top-k 3 --max-users 3
+```
+
 指标包括：
 
 ```text
@@ -97,6 +109,19 @@ HitRate@K
 Coverage
 Diversity
 SafetyViolationRate
+```
+
+默认评估项包括：
+
+```text
+popularity
+content
+bpr_only
+dach_no_health
+dach_no_llm
+dach_no_feedback
+dach_no_diversity
+dach_full
 ```
 
 ## 测试
@@ -115,6 +140,11 @@ dach_llmrec/
   evaluate.py      # synthetic feedback 时间切分评估
   demo_data.py     # 最小 demo SQLite 生成器
   cli.py           # 推荐 CLI
+  constants.py     # 权重和打分常量
+  embeddings.py    # embedding 接口与离线 HashEmbeddingProvider
+  models.py        # Recipe / Ingredient / UserProfile 数据模型
+  paths.py         # 默认数据库路径发现
+  experiments/     # 一键实验 runner
 configs/           # GPU 训练参数参考
 scripts/           # Windows/Linux 复现脚本
 docs/              # 详细复现说明
