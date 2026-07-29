@@ -8,13 +8,16 @@ DACH-LLMRec 是一个面向食材/食谱推荐的研究型算法项目。它基�
 - 不可推荐菜谱、避免食材、避免菜谱的硬过滤；
 - HCI 健康目标推荐；
 - 用户口味、食材偏好、历史反馈、内容质量、多样性综合排序；
-- PyTorch BPR 隐式反馈训练；
+- PyTorch BPR（Bayesian Personalized Ranking，贝叶斯个性化排序）隐式反馈训练；
+  BPR 基于点击、收藏、烹饪、跳过等隐式反馈构造正负样本对，优化用户对正样本的排序分数高于负样本。
 - 大模型/embedding 接口预留；
 - 疾病因素扩展接口，默认不把疾病表当作用户诊断；
 - baseline 和消融实验；
 - 无完整数据库时的 demo 数据复现。
 
 完整算法说明见：[docs/ALGORITHM.md](docs/ALGORITHM.md)。
+
+优化版算法计划原文见：[优化版算法计划：健康因素可扩展的 DACH-LLMRec](<优化版算法计划：健康因素可扩展的 DACH-LLMRec.md>)。
 
 ## 1. 数据边界
 
@@ -297,3 +300,4 @@ recommender = DACHLLMRecommender(
 ```
 
 推荐解释必须基于已计算证据，不能编造医学结论。
+
