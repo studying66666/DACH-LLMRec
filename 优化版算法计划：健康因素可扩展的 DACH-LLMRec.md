@@ -135,10 +135,10 @@ $$
 FusionScore(u,r)=\sigma(\theta^Tx(u,r)+b)
 $$
 
-DACH 网格搜索使用同一组可解释证据项，只学习权重，不改变证据定义：
+DACH 网格搜索使用同一组可解释证据项，只学习权重，不改变证据定义；默认固定权重公式仍然保留：
 
 $$
-Score_w(u,r)=\sum_k w_k f_k(u,r),\quad \sum_k w_k=1
+Score_{grid}(u,r)=\sum_k w_k^* f_k(u,r),\quad \sum_k w_k^*=1
 $$
 
 选择目标为：

@@ -124,7 +124,7 @@ DACH 权重网格搜索：
 python -m dach_llmrec.weight_search --db handoff_database_completed_20260729/dietrecommendation_no_empty_enhanced.sqlite --cutoff "2026-06-01 00:00:00" --top-k 10 --max-users 500 --bpr-model artifacts/dach_bpr_gpu.pt --output artifacts/weight_search.json
 ```
 
-该命令会输出默认权重指标、最优权重、最优验证集指标和排名靠前的候选权重组合。
+该命令会输出默认权重指标、最优权重、最优验证集指标和排名靠前的候选权重组合。它只改变权重选择，不改变证据公式本身。
 
 demo 数据一键实验：
 

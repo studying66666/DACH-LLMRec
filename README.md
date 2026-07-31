@@ -214,7 +214,7 @@ python -m dach_llmrec.bpr --db handoff_database_completed_20260729/dietrecommend
 python -m dach_llmrec.cli --db handoff_database_completed_20260729/dietrecommendation_no_empty_enhanced.sqlite --user-id 1 --top-k 5 --mode recipe --bpr-model artifacts/dach_bpr_gpu.pt
 ```
 
-DACH 权重网格搜索会枚举多组 evidence 权重，在验证集上按 `NDCG@K` 选择最优组合，并用 `Recall@K`、`Precision@K` 做并列排序：
+DACH 权重网格搜索会枚举多组 evidence 权重，在验证集上按 `NDCG@K` 选择最优组合，并用 `Recall@K`、`Precision@K` 做并列排序。它不改证据项定义，只替换固定权重向量：
 
 ```bash
 python -m dach_llmrec.weight_search --db handoff_database_completed_20260729/dietrecommendation_no_empty_enhanced.sqlite --cutoff "2026-06-01 00:00:00" --top-k 10 --max-users 500 --bpr-model artifacts/dach_bpr_gpu.pt --output artifacts/weight_search.json

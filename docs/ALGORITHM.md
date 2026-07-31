@@ -464,7 +464,7 @@ $$
 给定一组权重 $w$，菜谱分数为：
 
 $$
-Score_w(u,r)=\sum_{k}w_k f_k(u,r),\quad \sum_k w_k=1
+Score_{grid}(u,r)=\sum_{k}w_k^* f_k(u,r),\quad \sum_k w_k^*=1
 $$
 
 权重候选集合 $\mathcal{W}$ 由 `grid_step` 离散枚举得到，并限制单个分量不超过 `max_component_weight`；默认 DACH 权重也会额外加入候选集合。每组权重都按验证用户计算 Precision@K、Recall@K 和 NDCG@K，最终选择规则为：
@@ -473,7 +473,7 @@ $$
 w^*=\arg\max_{w\in\mathcal{W}}(NDCG_K(w), Recall_K(w), Precision_K(w))
 $$
 
-也就是说，先比较 NDCG@K；如果并列，再比较 Recall@K；仍并列时比较 Precision@K。推荐时仍然执行 DACH 硬过滤，并默认排除用户已交互菜谱。候选池大小默认为 `max(200, 25K)`。
+也就是说，先比较 NDCG@K；如果并列，再比较 Recall@K；仍并列时比较 Precision@K。推荐时仍然执行 DACH 硬过滤，并默认排除用户已交互菜谱。候选池大小默认为 `max(200, 25K)`。`dach_grid` 只是把固定权重换成搜索权重，不会改变证据项定义。
 
 ## 9. 推荐执行步骤
 
