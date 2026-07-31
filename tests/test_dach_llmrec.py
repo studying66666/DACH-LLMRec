@@ -83,6 +83,8 @@ def test_bpr_diagnostics_report_train_test_coverage(tmp_path):
     )
 
     assert result["training_split"]["users_with_positive_history"] == 2
+    assert result["training_split"]["negative_sampling"]["negative_samples_per_positive"] == 2
+    assert result["training_split"]["negative_sampling"]["random_negative_ratio"] >= 0.0
     assert result["evaluation_split"]["evaluated_users"] == 2
     assert result["evaluation_split"]["users_with_training_history"] == 1
     assert result["evaluation_split"]["test_positive_candidate_coverage"] == 1.0

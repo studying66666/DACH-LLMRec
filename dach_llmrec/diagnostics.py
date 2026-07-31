@@ -67,6 +67,11 @@ def diagnose_bpr(
                 "negative_items_total": _count_items(train["negatives"]),
                 "avg_positive_items_per_training_user": _average_count(train["positives"], train_any_users),
                 "avg_negative_items_per_training_user": _average_count(train["negatives"], train_any_users),
+                "negative_sampling": _negative_sampling_summary(
+                    train=train,
+                    candidate_recipes=candidate_recipes,
+                    negative_samples_per_positive=2,
+                ),
             },
             "evaluation_split": {
                 "evaluated_users": len(eval_user_ids),
@@ -359,6 +364,48 @@ def _bpr_top_k_for_user(
 
 def _count_items(items_by_user: dict[int, set[int]]) -> int:
     return sum(len(items) for items in items_by_user.values())
+
+
+def _negative_sampling_summary(
+    train: dict[str, dict[int, set[int]]],
+    candidate_recipes: list[int],
+    negative_samples_per_positive: int,
+) -> dict[str, Any]:
+    candidate_set = set(candidate_recipes)
+    training_user_ids = sorted(train["positives"])
+    usable_user_ids = [
+        user_id
+        for user_id in training_user_ids
+        if train["positives"][user_id] & candidate_set
+    ]
+    total_positive_items = 0
+    explicit_negative_triples = 0
+    sampled_negative_triples = 0
+    sampled_pool_sizes: list[int] = []
+    explicit_negative_users = 0
+    for user_id in usable_user_ids:
+        positive_items = train["positives"][user_id] & candidate_set
+        explicit_negative_items = train["negatives"].get(user_id, set()) & candidate_set
+        sampled_pool = candidate_set - positive_items
+        if not positive_items or not sampled_pool:
+            continue
+        total_positive_items += len(positive_items)
+        explicit_negative_users += 1 if explicit_negative_items else 0
+        sampled_pool_sizes.append(len(sampled_pool))
+        explicit_per_positive = min(len(explicit_negative_items), negative_samples_per_positive)
+        explicit_negative_triples += len(positive_items) * explicit_per_positive
+        sampled_negative_triples += len(positive_items) * negative_samples_per_positive - len(positive_items) * explicit_per_positive
+    total_triples = sampled_negative_triples + explicit_negative_triples
+    return {
+        "negative_samples_per_positive": negative_samples_per_positive,
+        "training_users_used": len(usable_user_ids),
+        "positive_items_used": total_positive_items,
+        "explicit_negative_users": explicit_negative_users,
+        "explicit_negative_triples": explicit_negative_triples,
+        "random_negative_triples": sampled_negative_triples,
+        "random_negative_ratio": _safe_div(sampled_negative_triples, total_triples),
+        "avg_sampled_pool_size": _safe_div(sum(sampled_pool_sizes), len(sampled_pool_sizes)),
+    }
 
 
 def _average_count(items_by_user: dict[int, set[int]], users: set[int]) -> float:

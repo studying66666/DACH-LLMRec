@@ -27,15 +27,31 @@ class BPRScorer:
     recipe_to_index: dict[int, int]
     user_embeddings: torch.Tensor
     recipe_embeddings: torch.Tensor
+    user_bias: torch.Tensor
+    item_bias: torch.Tensor
 
     @classmethod
     def load(cls, path: str | Path) -> "BPRScorer":
         payload = torch.load(str(path), map_location="cpu", weights_only=False)
+        user_embeddings = payload["user_embeddings"].float()
+        recipe_embeddings = payload["recipe_embeddings"].float()
+        user_bias = payload.get("user_bias")
+        if user_bias is None:
+            user_bias = torch.zeros(user_embeddings.shape[0], dtype=torch.float32)
+        else:
+            user_bias = user_bias.float().view(-1)
+        item_bias = payload.get("item_bias")
+        if item_bias is None:
+            item_bias = torch.zeros(recipe_embeddings.shape[0], dtype=torch.float32)
+        else:
+            item_bias = item_bias.float().view(-1)
         return cls(
             user_to_index={int(k): int(v) for k, v in payload["user_to_index"].items()},
             recipe_to_index={int(k): int(v) for k, v in payload["recipe_to_index"].items()},
-            user_embeddings=payload["user_embeddings"].float(),
-            recipe_embeddings=payload["recipe_embeddings"].float(),
+            user_embeddings=user_embeddings,
+            recipe_embeddings=recipe_embeddings,
+            user_bias=user_bias,
+            item_bias=item_bias,
         )
 
     def score(self, user_id: int, recipe_id: int) -> float | None:
@@ -45,8 +61,8 @@ class BPRScorer:
             return None
         raw = torch.dot(
             self.user_embeddings[user_index], self.recipe_embeddings[recipe_index]
-        ).item()
-        return 1.0 / (1.0 + torch.exp(torch.tensor(-raw)).item())
+        ) + self.user_bias[user_index] + self.item_bias[recipe_index]
+        return torch.sigmoid(raw).item()
 
 
 class BPRModel(nn.Module):
@@ -54,8 +70,12 @@ class BPRModel(nn.Module):
         super().__init__()
         self.user_embeddings = nn.Embedding(num_users, dim)
         self.item_embeddings = nn.Embedding(num_items, dim)
+        self.user_bias = nn.Embedding(num_users, 1)
+        self.item_bias = nn.Embedding(num_items, 1)
         nn.init.normal_(self.user_embeddings.weight, std=0.05)
         nn.init.normal_(self.item_embeddings.weight, std=0.05)
+        nn.init.zeros_(self.user_bias.weight)
+        nn.init.zeros_(self.item_bias.weight)
 
     def forward(
         self,
@@ -66,8 +86,9 @@ class BPRModel(nn.Module):
         user_vec = self.user_embeddings(users)
         pos_vec = self.item_embeddings(positives)
         neg_vec = self.item_embeddings(negatives)
-        pos_scores = (user_vec * pos_vec).sum(dim=1)
-        neg_scores = (user_vec * neg_vec).sum(dim=1)
+        user_bias = self.user_bias(users).squeeze(-1)
+        pos_scores = (user_vec * pos_vec).sum(dim=1) + user_bias + self.item_bias(positives).squeeze(-1)
+        neg_scores = (user_vec * neg_vec).sum(dim=1) + user_bias + self.item_bias(negatives).squeeze(-1)
         return pos_scores, neg_scores
 
 
@@ -146,6 +167,8 @@ def train_bpr(
             "recipe_to_index": recipe_to_index,
             "user_embeddings": model.user_embeddings.weight.detach().cpu(),
             "recipe_embeddings": model.item_embeddings.weight.detach().cpu(),
+            "user_bias": model.user_bias.weight.detach().cpu().view(-1),
+            "item_bias": model.item_bias.weight.detach().cpu().view(-1),
             "metadata": {
                 "db_path": str(db_path),
                 "cutoff": cutoff,
@@ -156,6 +179,7 @@ def train_bpr(
                 "seed": seed,
                 "device": str(selected_device),
                 "boundary": "trained from synthetic feedback only",
+                "bias_terms": True,
             },
             "losses": losses,
         }
