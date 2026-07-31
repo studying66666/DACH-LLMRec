@@ -1,6 +1,7 @@
 from dach_llmrec import DACHLLMRecommender
 from dach_llmrec.bpr import train_bpr
 from dach_llmrec.demo_data import create_demo_database
+from dach_llmrec.diagnostics import diagnose_bpr
 from dach_llmrec.experiments.run_all import run_all
 
 
@@ -68,6 +69,26 @@ def test_bpr_training_artifact_can_be_loaded(tmp_path):
         recommender.close()
 
 
+def test_bpr_diagnostics_report_train_test_coverage(tmp_path):
+    db_path = _demo_db(tmp_path)
+    model_path = tmp_path / "diagnostic_bpr.pt"
+    train_bpr(db_path, output=model_path, epochs=1, dim=8, batch_size=8, device="cpu")
+
+    result = diagnose_bpr(
+        db_path=db_path,
+        cutoff="2026-06-01 00:00:00",
+        top_k=3,
+        max_users=3,
+        bpr_model_path=model_path,
+    )
+
+    assert result["training_split"]["users_with_positive_history"] == 2
+    assert result["evaluation_split"]["evaluated_users"] == 2
+    assert result["evaluation_split"]["users_with_training_history"] == 1
+    assert result["evaluation_split"]["test_positive_candidate_coverage"] == 1.0
+    assert not result["bpr_top_k"]["skipped"]
+    assert "history_overlap_rate" in result["bpr_top_k"]
+
 def test_run_all_demo_experiment_writes_outputs(tmp_path):
     output_dir = tmp_path / "experiment"
     result = run_all(
@@ -85,3 +106,4 @@ def test_run_all_demo_experiment_writes_outputs(tmp_path):
     assert (output_dir / "metrics.csv").exists()
     assert "dach_full" in result["evaluation"]["results"]
     assert "content" in result["evaluation"]["results"]
+

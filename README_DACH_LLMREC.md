@@ -1,6 +1,24 @@
 # DACH-LLMRec 原型实现
 
-这是一个读取当前 SQLite 数据库的推荐算法原型，实现了“健康目标约束 + 口味/食材内容匹配 + 合成反馈 + 可插拔 LLM 语义增强”的 Top-K 推荐。
+这是一个读取当前 SQLite 数据库的推荐算法原型，实现了“健康目标约束 + 口味/食材内容匹配 + 合成反馈 + 可替换语义向量接口”的 Top-K 推荐。当前默认语义向量是本地哈希向量，不是真实大模型 embedding。
+
+
+## 算法说明
+
+当前算法采用“先过滤、再融合、再重排、最后解释”的流程：先过滤不可推荐项、用户避免项和可选疾病禁忌项；再融合口味匹配、健康目标匹配、内容偏好、反馈、语义相似度、质量和多样性证据；菜谱推荐最后做贪心多样性重排。
+
+默认菜谱综合分为：
+
+\[
+\begin{aligned}
+Score(u,r)=&0.22PreferenceScore(u,r)+0.22HealthGoalScore(u,r)\\
+&+0.16ContentScore(u,r)+0.15FeedbackScore(u,r)\\
+&+0.10SemanticScore(u,r)+0.10QualityScore(r)\\
+&+0.05DiversityBoost(r)
+\end{aligned}
+\]
+
+其中健康目标分由 HCI 推荐菜谱的直接命中和 HCI 推荐食材的间接命中组成；反馈分由行为权重计算，加载 BPR 后再融合 BPR 个性化分；疾病分数默认关闭，只在显式传入疾病 ID 时启用。详细公式和步骤见 `docs/ALGORITHM.md`。
 
 默认数据库路径：
 

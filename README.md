@@ -50,48 +50,43 @@ D:\Documents\推荐算法\handoff_database_completed_20260729\dietrecommendation
 
 ## 2. 算法总体思路
 
-完整算法设计、打分公式、实现状态和暂未实现的功能见 [docs/ALGORITHM.md](docs/ALGORITHM.md)。
+完整算法设计、打分公式、实现状态和暂未实现的功能见 [docs/ALGORITHM.md](docs/ALGORITHM.md)。这里给出入口版说明。
 
-推荐流程如下：
+DACH-LLMRec 当前采用“先过滤、再融合、再重排、最后解释”的混合推荐流程：
 
-```text
-SQLite 数据库
-  -> 读取用户、菜谱、食材、健康目标、口味和反馈
-  -> 构建用户画像和菜谱/食材特征
-  -> 执行硬过滤
-  -> 计算多维推荐分数
-  -> 多样性重排
-  -> 返回 Top-K 推荐和证据解释
-```
+1. 读取 SQLite 中的用户、菜谱、食材、健康目标、口味、营养可信度和反馈数据。
+2. 构建用户画像：口味偏好、HCI 健康目标、偏好食材、避免食材、避免菜谱和历史行为。
+3. 构建候选特征：菜谱口味向量、健康目标直接/间接信号、内容偏好、反馈分、语义向量和质量分。
+4. 先做硬过滤：不可推荐菜谱、用户避免菜谱、包含用户避免食材的菜谱直接排除；显式启用疾病 ID 时，疾病禁忌菜谱和疾病禁忌食材也直接排除。
+5. 对过滤后的候选计算多证据综合分。
+6. 菜谱推荐再做贪心多样性重排，降低同菜系、同做法、同主食材重复。
+7. 返回 Top-K、综合分、证据分和模板化解释。
 
-菜谱推荐默认打分公式：
+默认菜谱综合分为：
 
-```text
-Score(u,r) =
-0.22 * PreferenceScore(u,r)
-+ 0.22 * HealthGoalScore(u,r)
-+ 0.16 * ContentScore(u,r)
-+ 0.15 * FeedbackScore(u,r)
-+ 0.10 * LLMAlignmentScore(u,r)
-+ 0.10 * QualityScore(r)
-+ 0.05 * DiversityBoost(u,r)
-```
+\[
+\begin{aligned}
+Score(u,r)=&0.22PreferenceScore(u,r)+0.22HealthGoalScore(u,r)\\
+&+0.16ContentScore(u,r)+0.15FeedbackScore(u,r)\\
+&+0.10SemanticScore(u,r)+0.10QualityScore(r)\\
+&+0.05DiversityBoost(r)
+\end{aligned}
+\]
 
-如果未来补充了可靠的用户疾病/风险画像，可启用疾病扩展公式：
+其中，口味分来自用户口味向量与菜谱口味向量的余弦相似度；健康目标分来自 HCI 推荐菜谱的直接命中和推荐食材的间接命中；内容分衡量菜谱食材是否命中用户偏好食材；反馈分来自行为权重和可选 BPR 模型；语义分来自用户文本向量与菜谱文本向量的余弦相似度；质量分来自内容完整度和营养可信度；多样性分用于 Top-K 重排。
 
-```text
-Score(u,r) =
-0.18 * PreferenceScore(u,r)
-+ 0.18 * HealthGoalScore(u,r)
-+ 0.16 * DiseaseScore(u,r)
-+ 0.14 * ContentScore(u,r)
-+ 0.12 * FeedbackScore(u,r)
-+ 0.10 * LLMAlignmentScore(u,r)
-+ 0.08 * QualityScore(r)
-+ 0.04 * DiversityBoost(u,r)
-```
+如果未来补充了可靠的用户疾病/风险画像，或调用方显式传入疾病 ID，可启用疾病扩展公式：
 
-疾病分数默认不启用，避免把疾病知识表误当成用户诊断信息。
+\[
+\begin{aligned}
+Score(u,r)=&0.18PreferenceScore(u,r)+0.18HealthGoalScore(u,r)\\
+&+0.16DiseaseScore(r)+0.14ContentScore(u,r)\\
+&+0.12FeedbackScore(u,r)+0.10SemanticScore(u,r)\\
+&+0.08QualityScore(r)+0.04DiversityBoost(r)
+\end{aligned}
+\]
+
+疾病分数默认不启用，避免把疾病知识表误当成用户诊断信息。当前默认语义向量是本地哈希向量，不是真实大模型 embedding。
 
 ## 3. 主要使用的数据表
 
@@ -300,4 +295,3 @@ recommender = DACHLLMRecommender(
 ```
 
 推荐解释必须基于已计算证据，不能编造医学结论。
-

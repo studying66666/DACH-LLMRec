@@ -1,902 +1,551 @@
 # DACH-LLMRec 算法说明
 
-本文档说明当前项目中的推荐算法逻辑，包括使用哪些数据库表、如何处理数据、如何向量化、如何打分、BPR 如何训练、大模型接口如何使用，以及疾病因素如何扩展。
-
-对应的优化版算法计划原文见：[优化版算法计划：健康因素可扩展的 DACH-LLMRec](<../优化版算法计划：健康因素可扩展的 DACH-LLMRec.md>)。
-
-## 0. 完整计划与当前实现状态
-
-本项目的完整计划是做一个健康因素可扩展的食材/食谱推荐框架。它不是只靠一个模型给分，而是把结构化规则、用户画像、隐式反馈、语义向量和安全约束组合起来。
-
-完整计划流程：
-
-```text
-SQLite 膳食数据库
-  -> 数据读取与字段规范化
-  -> 用户画像构建
-  -> 菜谱/食材内容特征构建
-  -> 安全与禁忌硬过滤
-  -> 多路候选召回
-  -> 多维打分排序
-  -> BPR / 图模型 / 深度排序模型增强
-  -> 大模型语义增强
-  -> 多样性重排
-  -> 推荐解释生成
-  -> 离线评估、baseline 对比、消融实验
-```
-
-当前代码实际实现的流程：
-
-```text
-SQLite 膳食数据库或 demo SQLite
-  -> 数据读取
-  -> UserProfile 构建
-  -> 菜谱/食材特征构建
-  -> recommendable、避免菜谱、避免食材硬过滤
-  -> 可选疾病 ID 硬过滤
-  -> 规则分数 + 反馈分数 + 哈希语义分数加权排序
-  -> 菜谱 Top-K 多样性重排
-  -> 模板化证据解释
-  -> BPR 训练、baseline、消融和离线指标
-```
+本文档说明当前项目实际实现的推荐算法。重点是把算法逻辑、数学公式、执行步骤和使用的方法讲清楚，而不是列代码接口。
 
-### 0.1 当前已经实现
-
-以下内容已经在项目代码中实现：
-
-```text
-1. 可安装 Python 项目结构。
-2. demo SQLite 数据库生成。
-3. 完整数据库路径自动发现和 --db 指定。
-4. norm_recipe_v1、norm_ingredient_v1、norm_recipe_ingredient_v1 等核心表读取。
-5. synthetic 用户画像、口味、健康目标、运动和反馈读取。
-6. hci、hcirecommendrecipe、hcirecommendingredient 健康目标知识读取。
-7. taste、ingredient2taste 口味知识读取。
-8. norm_recipe_nutrition_feature_eligibility_v1 营养可信度读取。
-9. diseaseavoidrecipe、diseaseavoidingredient、diseaserecommendrecipe、diseaserecommendingredient 扩展表读取。
-10. UserProfile 构建。
-11. HCI 父子层级扩展。
-12. recommendable、用户避免菜谱、用户避免食材硬过滤。
-13. 显式传入 disease_id 时的疾病禁忌硬过滤。
-14. 菜谱推荐公式。
-15. 食材推荐公式。
-16. PreferenceScore、HealthGoalScore、ContentScore、FeedbackScore、LLMAlignmentScore、QualityScore、DiversityBoost。
-17. DiseaseScore 扩展分数，但默认关闭。
-18. PyTorch BPR 隐式反馈训练。
-19. BPR 模型保存和推荐时加载。
-20. popularity、content、bpr_only 和 DACH 消融实验。
-21. Precision@K、Recall@K、NDCG@K、HitRate@K、Coverage、Diversity、SafetyViolationRate。
-22. 基于证据字段的模板化推荐解释。
-```
-
-### 0.2 当前没有实现，不能声称完成
-
-以下内容属于后续计划或论文增强方向，目前不能写成已经完成：
+当前 DACH-LLMRec 是一个健康目标约束的混合推荐原型。它把结构化规则、用户画像、食材/菜谱内容、隐式反馈、语义向量和多样性重排组合起来，完成食谱和食材 Top-K 推荐。
 
-```text
-1. 真实大模型 embedding。
-   当前默认是 HashEmbeddingProvider，本质是本地哈希向量。
+需要先明确三条边界：
 
-2. 大模型生成推荐解释。
-   当前 explanation 是模板化解释，不调用大模型生成。
+1. 当前用户画像和反馈来自 synthetic 表，只能用于模拟实验。
+2. 当前默认语义向量是确定性哈希向量，不是真实大模型 embedding。
+3. 疾病相关知识表默认不代表用户诊断；只有显式传入疾病 ID 时，疾病硬过滤和疾病分数才启用。
 
-3. 大模型 reranker。
-   当前最终排序由可解释公式完成，大模型没有直接决定排序。
+## 1. 总体方法
 
-4. L_semantic_alignment、L_health_margin、L_safety_penalty 多任务训练损失。
-   当前训练主要是 BPR。
+DACH-LLMRec 不是单一模型，而是一个“先过滤、再打分、再重排、最后解释”的多证据融合排序方法。
 
-5. LightGCN、PinSage、GAT 或异构图神经网络。
-   当前没有图神经网络实现。
+整体逻辑如下：
 
-6. Two-Tower、DeepFM、Wide&Deep 等深度排序模型。
-   当前没有这些深度排序模型。
+1. 从 SQLite 膳食数据库读取菜谱、食材、菜谱-食材关系、口味知识、健康目标知识、营养可信度、用户画像和用户反馈。
+2. 构建用户画像，包括口味偏好、健康目标、偏好食材、避免食材、避免菜谱和历史行为。
+3. 构建候选项特征，包括菜谱口味分布、菜谱健康目标信号、食材健康目标信号、内容质量和语义文本向量。
+4. 在排序前执行硬过滤，先移除不可推荐项、用户避免项和可选疾病禁忌项。
+5. 对剩余候选计算多项证据分数。
+6. 将证据分数加权融合为综合分数。
+7. 对菜谱 Top-K 做贪心多样性重排，降低同菜系、同做法、同主食材的重复。
+8. 根据证据阈值生成模板化解释。
 
-7. 真实用户实验。
-   当前用户和反馈来自 synthetic 表，只能称为模拟实验。
+当前实际用到的方法包括：
 
-8. 基于真实用户疾病诊断的个性化推荐。
-   当前数据库缺少可靠 user -> disease/risk 画像。
+- 基于规则的安全硬过滤；
+- 基于口味向量的内容相似度；
+- 基于 HCI 健康目标知识的规则匹配；
+- 基于用户偏好食材的内容匹配；
+- 基于隐式反馈事件权重的行为分数；
+- 可选 BPR 隐式反馈矩阵分解；
+- 基于文本向量余弦相似度的语义匹配；
+- 基于内容完整度和营养可信度的质量分；
+- 基于菜系、做法和主食材相似度的多样性重排。
 
-9. 精准临床营养推荐。
-   当前营养可信度不完全一致，不能作为临床营养依据。
+## 2. 符号定义
 
-10. 多随机种子自动汇总、置信区间和统计显著性检验。
-    当前评估指标已实现，但论文级统计报告还没实现。
+设用户为 \(u\)，菜谱为 \(r\)，食材为 \(i\)，健康目标为 \(c\)，疾病或健康风险因素为 \(d\)。
 
-11. 生产级 API 服务。
-    当前是命令行和 Python 调用原型。
-```
+主要集合和向量：
 
-### 0.3 当前算法质量判断
+- \(T_u\)：用户口味偏好向量。
+- \(T_r\)：菜谱口味分布向量。
+- \(H_u\)：用户健康目标权重集合。
+- \(I_r\)：菜谱 \(r\) 包含的食材集合。
+- \(F_u\)：用户偏好食材集合及权重。
+- \(A_u^r\)：用户避免的菜谱集合。
+- \(A_u^i\)：用户避免的食材集合。
+- \(E_u\)：用户文本画像向量。
+- \(E_r\)：菜谱文本向量。
+- \(E_i\)：食材文本向量。
 
-从工程和论文原型角度看，当前项目已经具备：
+所有证据分数最终都归一化到 \([0,1]\)。分数越高，表示该证据越支持推荐。
 
-```text
-可运行性：
-  有 demo 数据、CLI、测试和一键实验 runner。
+## 3. 用户画像构建
 
-可解释性：
-  推荐结果返回各子分数 evidence 和 matched_factors。
+### 3.1 口味偏好
 
-可扩展性：
-  embedding_provider、bpr_model_path、health_factors、enable_disease_constraints 都是可替换接口。
+用户口味偏好来自 synthetic 用户口味表。原始偏好取值为 \(-2,-1,0,1,2\)，表示从强烈不喜欢到强烈喜欢。
 
-安全边界：
-  疾病表默认不作为用户诊断，疾病约束必须显式启用。
+归一化后：
 
-实验基础：
-  已有 baseline、消融和常见 Top-K 指标。
-```
+\[
+T_u(t)=\frac{p_u(t)}{2}
+\]
 
-但从“完整论文级创新算法”角度看，当前还只是第一版原型。要更专业，后续需要补真实 embedding、GPU 多 seed 实验、置信区间、疾病画像数据和更强的深度/图模型对比。
+其中 \(p_u(t)\) 是用户对口味 \(t\) 的原始偏好值。归一化后 \(T_u(t)\in[-1,1]\)。
 
-## 1. 任务定义
+### 3.2 健康目标权重
 
-目标是根据用户多维信息推荐食材和食谱。
+用户健康目标来自 synthetic 用户健康目标表。系统假设优先级数字越小，健康目标越重要。
 
-输入：
+\[
+H_u(c)=\frac{1}{priority_u(c)}
+\]
 
-```text
-用户基础信息
-用户口味偏好
-用户健康目标
-用户运动/活动信息
-用户历史反馈
-用户避免食材/避免菜谱
-可选疾病或健康风险因素
-```
+例如，优先级为 1 的目标权重为 1.0，优先级为 2 的目标权重为 0.5。
 
-输出：
+健康目标表有父子层级。为了让父目标和子目标都能参与匹配，系统会扩展用户健康目标：
 
-```text
-Top-K 食谱或食材
-综合分数
-各模块证据分数
-命中的推荐因素
-推荐解释
-```
+\[
+H_u(c_{child})=\max(H_u(c_{child}),0.8H_u(c_{parent}))
+\]
 
-当前系统不是疾病诊断系统，也不是临床食疗系统。默认只做健康目标约束推荐。
+\[
+H_u(c_{parent})=\max(H_u(c_{parent}),0.5H_u(c_{child}))
+\]
 
-## 2. 使用的数据表
+含义是：父目标向子目标传播时保留 80% 权重，子目标向父目标传播时保留 50% 权重。重复传播后保留最大权重。
 
-### 2.1 菜谱和食材
+### 3.3 历史反馈
 
-```text
-norm_recipe_v1
-norm_ingredient_v1
-norm_recipe_ingredient_v1
-```
+用户反馈事件使用固定行为权重：
 
-用途：
+| 事件 | 权重 |
+| --- | ---: |
+| cook | 5.0 |
+| save | 4.0 |
+| click | 2.0 |
+| impression | 0.5 |
+| skip | -1.0 |
+| dislike | -4.0 |
 
-- `norm_recipe_v1` 提供菜谱名称、描述、菜系、烹饪方式、口味标签、内容状态、是否可推荐。
-- `norm_ingredient_v1` 提供食材名称、类别、营养状态和来源状态。
-- `norm_recipe_ingredient_v1` 建立菜谱和食材之间的关系，并区分主料和辅料。
+对用户 \(u\) 和菜谱 \(r\)，事件聚合值为：
 
-### 2.2 营养可信度
+\[
+RawFeedback(u,r)=\sum_{e\in Events(u,r)}w_e
+\]
 
-```text
-norm_recipe_nutrition_feature_eligibility_v1
-```
+其中 \(w_e\) 是事件权重。
 
-用途：
+## 4. 候选项特征构建
 
-- 判断菜谱营养特征是否适合进入模型。
-- 当前分为 `standard`、`sensitivity_only`、`exclude_from_nutrition_model`。
+### 4.1 菜谱食材权重
 
-### 2.3 用户画像和反馈
+菜谱和食材之间的关系来自菜谱-食材表。系统区分主料和辅料：
 
-```text
-norm_synthetic_user_v1
-norm_synthetic_user_taste_v1
-norm_synthetic_user_health_goal_v1
-norm_synthetic_user_sport_v1
-norm_synthetic_feedback_event_v1
-```
+\[
+W(r,i)=
+\begin{cases}
+1.0, & i\text{ 是主料}\\
+0.5, & i\text{ 是辅料}
+\end{cases}
+\]
 
-用途：
-
-- 用户基础画像；
-- 用户口味；
-- 用户健康目标；
-- 用户运动习惯；
-- 用户隐式反馈。
-
-这些表当前是 synthetic 数据，只能用于模拟用户实验。
-
-### 2.4 健康目标知识
-
-```text
-hci
-hcirecommendrecipe
-hcirecommendingredient
-```
-
-用途：
-
-- `hci` 表示健康目标体系；
-- `hcirecommendrecipe` 表示健康目标推荐菜谱；
-- `hcirecommendingredient` 表示健康目标推荐食材。
-
-### 2.5 口味知识
-
-```text
-taste
-ingredient2taste
-```
-
-用途：
-
-- 建立食材和口味之间的映射；
-- 进一步得到菜谱口味向量。
-
-### 2.6 疾病扩展表
-
-```text
-diseaseavoidrecipe
-diseaseavoidingredient
-diseaserecommendrecipe
-diseaserecommendingredient
-```
-
-用途：
-
-- 后续如果补充可靠 `user -> disease/risk` 数据，可以作为疾病约束和疾病推荐信号。
-
-当前不把 `disease` 表当作用户画像，因为数据库中没有可靠的用户疾病诊断关系。
-
-## 3. 用户向量构造
-
-用户画像表示为：
-
-```text
-UserProfile =
-  age_years
-  sex
-  activity_level
-  diet_goal
-  taste_preferences
-  health_goals
-  sport_summary
-  favored_ingredients
-  avoided_ingredients
-  avoided_recipes
-```
-
-### 3.1 口味向量
-
-用户口味偏好来自：
-
-```text
-norm_synthetic_user_taste_v1.preference
-```
-
-原始取值：
-
-```text
--2, -1, 0, 1, 2
-```
-
-归一化：
-
-```text
-taste_weight = preference / 2
-```
-
-范围：
-
-```text
--1.0 到 1.0
-```
-
-含义：
-
-```text
--1.0 强烈不喜欢
- 0.0 中性
- 1.0 强烈喜欢
-```
-
-### 3.2 健康目标向量
-
-用户健康目标来自：
-
-```text
-norm_synthetic_user_health_goal_v1
-```
-
-优先级转换为权重：
-
-```text
-health_weight = 1 / priority
-```
-
-例如：
-
-```text
-priority = 1 -> 1.0
-priority = 2 -> 0.5
-```
-
-### 3.3 HCI 层级扩展
-
-健康目标表 `hci` 有父子层级。为了避免父目标和子目标无法命中规则，系统会扩展健康目标：
-
-```text
-父目标 -> 子目标，权重乘 0.8
-子目标 -> 父目标，权重乘 0.5
-```
-
-例如用户目标是“免疫调节”，规则表中是“增强免疫”，通过层级扩展后仍然可以匹配。
-
-### 3.4 历史反馈
-
-反馈来自：
-
-```text
-norm_synthetic_feedback_event_v1
-```
-
-事件权重：
-
-```text
-cook       =  5.0
-save       =  4.0
-click      =  2.0
-impression =  0.5
-skip       = -1.0
-dislike    = -4.0
-```
-
-## 4. 菜谱和食材特征构造
-
-### 4.1 菜谱-食材向量
-
-根据：
-
-```text
-norm_recipe_ingredient_v1
-```
-
-构建菜谱食材集合。
-
-权重：
-
-```text
-主料 = 1.0
-辅料 = 0.5
-```
+如果同一食材在同一菜谱中重复出现，保留最大权重。
 
 ### 4.2 菜谱口味向量
 
-路径：
+菜谱口味不是直接由用户反馈得到，而是通过“菜谱 -> 食材 -> 口味”的知识链路统计得到。
 
-```text
-recipe -> ingredient -> ingredient2taste -> taste
-```
+对菜谱 \(r\) 和口味 \(t\)：
 
-对一个菜谱中所有食材的口味进行加权统计，再归一化为口味分布向量。
+\[
+T_r(t)=\frac{\sum_{i\in I_r}W(r,i)\cdot \mathbb{1}(i\text{ 具有口味 }t)}
+{\sum_{i\in I_r}W(r,i)}
+\]
 
-### 4.3 菜谱健康目标向量
+也就是说，主料对菜谱口味分布影响更大，辅料仍参与但权重较低。
 
-两种来源：
+### 4.3 健康目标信号
 
-```text
-recipe -> hcirecommendrecipe
-recipe -> ingredient -> hcirecommendingredient
-```
+菜谱健康目标信号有两种来源。
 
-也就是说，菜谱可以直接匹配健康目标，也可以通过它包含的食材间接匹配健康目标。
+直接信号来自健康目标推荐菜谱关系：
 
-### 4.4 语义文本向量
+\[
+DirectHealth(r,c)=\frac{Intensity(r,c)}{5}
+\]
 
-用户文本由以下信息拼接：
+间接信号来自健康目标推荐食材关系：
 
-```text
-年龄、性别、活动水平、饮食目标、口味、健康目标、运动、偏好食材
-```
+\[
+IngredientHealth(i,c)=\frac{Intensity(i,c)}{5}
+\]
 
-菜谱文本由以下信息拼接：
-
-```text
-菜谱名称、描述、菜系、做法、口味标签、食材、营养可信度
-```
-
-当前默认使用 `HashEmbeddingProvider` 生成离线确定性向量。它不是真实大模型，只是为了保证项目不依赖网络和 API key 也能复现。
+其中 \(Intensity\) 是数据库中的推荐强度，当前按 5 做归一化，并截断到 \([0,1]\)。
 
 ## 5. 硬过滤
 
-硬过滤在打分之前执行。
+硬过滤在所有加权打分之前执行。被硬过滤排除的候选不会进入排序，因此不能被高兴趣分数抵消。
 
-当前规则：
+菜谱 \(r\) 必须同时满足：
 
-```text
-norm_recipe_v1.recommendable 必须等于 1
-用户避免菜谱直接排除
-菜谱包含用户避免食材直接排除
-```
+\[
+recommendable(r)=1
+\]
 
-如果启用疾病扩展：
+\[
+r\notin A_u^r
+\]
 
-```text
-diseaseavoidrecipe 命中的菜谱直接排除
-diseaseavoidingredient 命中的食材所在菜谱直接排除
-```
+\[
+I_r\cap A_u^i=\varnothing
+\]
 
-这些不是负分，而是直接过滤。原因是安全约束不能被高偏好分抵消。
+如果显式启用疾病因素 \(d\)，还必须满足：
 
-## 6. 推荐打分公式
+\[
+r\notin AvoidRecipe(d)
+\]
 
-本节公式不是单纯计划。菜谱默认公式和疾病扩展公式已经在代码中实现，权重定义在：
+\[
+I_r\cap AvoidIngredient(d)=\varnothing
+\]
 
-```text
-dach_llmrec/constants.py
-```
+食材推荐也会排除用户避免食材；启用疾病因素时，还会排除疾病禁忌食材。
 
-实际加权求和位置：
+## 6. 多证据分数
 
-```text
-dach_llmrec/recommender.py::_weighted_score
-dach_llmrec/recommender.py::_recommend_recipes
-dach_llmrec/recommender.py::_apply_diversity
-```
+### 6.1 口味匹配分
 
-### 6.1 菜谱默认公式
+菜谱口味匹配分使用用户口味向量和菜谱口味向量的余弦相似度：
 
-默认不启用疾病因素时：
+\[
+PreferenceScore(u,r)=\frac{\cos(T_u,T_r)+1}{2}
+\]
 
-```text
-Score(u,r) =
-0.22 * PreferenceScore(u,r)
-+ 0.22 * HealthGoalScore(u,r)
-+ 0.16 * ContentScore(u,r)
-+ 0.15 * FeedbackScore(u,r)
-+ 0.10 * LLMAlignmentScore(u,r)
-+ 0.10 * QualityScore(r)
-+ 0.05 * DiversityBoost(u,r)
-```
+如果用户没有口味画像，或菜谱没有可用口味向量，则使用中性分 0.5。
 
-代码对应权重：
+食材口味分取该食材关联口味在用户口味向量中的平均偏好，再映射到 \([0,1]\)：
 
-```python
-RECIPE_WEIGHTS = {
-    "preference": 0.22,
-    "health_goal": 0.22,
-    "content": 0.16,
-    "feedback": 0.15,
-    "llm_alignment": 0.10,
-    "quality": 0.10,
-    "diversity": 0.05,
-}
-```
+\[
+PreferenceScore(u,i)=\frac{1}{2}+\left(\frac{1}{2|T_i|}\sum_{t\in T_i}T_u(t)\right)
+\]
 
-### 6.2 菜谱疾病扩展公式
+无口味证据时同样使用 0.5。
 
-启用疾病扩展后：
+### 6.2 健康目标分
 
-```text
-Score(u,r) =
-0.18 * PreferenceScore(u,r)
-+ 0.18 * HealthGoalScore(u,r)
-+ 0.16 * DiseaseScore(u,r)
-+ 0.14 * ContentScore(u,r)
-+ 0.12 * FeedbackScore(u,r)
-+ 0.10 * LLMAlignmentScore(u,r)
-+ 0.08 * QualityScore(r)
-+ 0.04 * DiversityBoost(u,r)
-```
+菜谱健康目标分由直接匹配和食材间接匹配组成。
 
-代码对应权重：
+直接匹配：
 
-```python
-RECIPE_WEIGHTS_WITH_DISEASE = {
-    "preference": 0.18,
-    "health_goal": 0.18,
-    "disease": 0.16,
-    "content": 0.14,
-    "feedback": 0.12,
-    "llm_alignment": 0.10,
-    "quality": 0.08,
-    "diversity": 0.04,
-}
-```
+\[
+Direct(u,r)=\max_{c\in H_u} H_u(c)\cdot DirectHealth(r,c)
+\]
 
-疾病扩展默认关闭。只有调用 `recommend(..., enable_disease_constraints=True, health_factors=[{"type": "disease", "id": ...}])` 或 CLI 传入 `--disease-id` 时，才会进入疾病硬过滤和疾病加权公式。
+间接匹配：
 
-### 6.3 食材默认公式
+\[
+Indirect(u,r)=\frac{1}{|I_r|}\sum_{i\in I_r}\max_{c\in H_u} H_u(c)\cdot IngredientHealth(i,c)
+\]
 
-食材推荐公式也已经实现，位置在：
+最终菜谱健康目标分：
 
-```text
-dach_llmrec/recommender.py::_recommend_ingredients
-dach_llmrec/recommender.py::_ingredient_evidence
-```
+\[
+HealthGoalScore(u,r)=clip_{[0,1]}\left(0.6Direct(u,r)+0.4Indirect(u,r)\right)
+\]
 
-默认不启用疾病因素时：
+食材健康目标分：
 
-```text
-IngredientScore(u,i) =
-0.25 * PreferenceScore(u,i)
-+ 0.25 * HealthGoalScore(u,i)
-+ 0.20 * ContentScore(u,i)
-+ 0.10 * FeedbackScore(u,i)
-+ 0.10 * LLMAlignmentScore(u,i)
-+ 0.10 * QualityScore(i)
-```
+\[
+HealthGoalScore(u,i)=clip_{[0,1]}\left(\max_{c\in H_u}H_u(c)\cdot IngredientHealth(i,c)\right)
+\]
 
-启用疾病扩展后：
+没有用户健康目标时使用中性分 0.5。
 
-```text
-IngredientScore(u,i) =
-0.18 * PreferenceScore(u,i)
-+ 0.18 * HealthGoalScore(u,i)
-+ 0.18 * DiseaseScore(u,i)
-+ 0.18 * ContentScore(u,i)
-+ 0.08 * FeedbackScore(u,i)
-+ 0.10 * LLMAlignmentScore(u,i)
-+ 0.10 * QualityScore(i)
-```
+### 6.3 内容偏好分
 
-### 6.4 是否已经实现公式
+菜谱内容偏好分衡量菜谱食材是否命中用户偏好食材。
 
-结论：
+\[
+ContentScore(u,r)=\frac{\sum_{i\in I_r}W(r,i)\cdot F_u(i)}{\sum_{i\in I_r}W(r,i)}
+\]
 
-```text
-菜谱默认加权公式：已实现。
-菜谱疾病扩展加权公式：已实现，但默认关闭。
-食材默认加权公式：已实现。
-食材疾病扩展加权公式：已实现，但默认关闭。
-真实大模型 embedding 得到的 LLMAlignmentScore：未实现。
-HashEmbeddingProvider 版本的 LLMAlignmentScore：已实现。
-```
+其中 \(F_u(i)\) 是用户对食材 \(i\) 的偏好权重。没有偏好食材证据时使用 0.5。
 
-## 7. 各分数如何计算
+食材内容偏好分直接使用用户对该食材的偏好权重；如果没有记录，则使用 0.5：
 
-### 7.1 PreferenceScore
+\[
+ContentScore(u,i)=F_u(i)
+\]
 
-用户口味向量和菜谱口味向量做余弦相似度：
+### 6.4 反馈分
 
-```text
-raw = cosine(user_taste_vector, recipe_taste_vector)
-PreferenceScore = (raw + 1) / 2
-```
+先将用户对菜谱的历史行为聚合为事件分：
 
-最终范围是 `[0, 1]`。
+\[
+EventScore(u,r)=\sigma\left(\frac{RawFeedback(u,r)}{5}\right)
+\]
 
-### 7.2 HealthGoalScore
+其中 \(\sigma(x)=\frac{1}{1+e^{-x}}\)。没有历史行为时使用 0.5。
 
-健康目标分由直接命中和间接命中组成：
+如果没有加载 BPR 模型：
 
-```text
-direct = hcirecommendrecipe 直接命中分
-indirect = hcirecommendingredient 食材间接命中平均分
-
-HealthGoalScore = 0.6 * direct + 0.4 * indirect
-```
-
-强度归一化：
-
-```text
-normalized_intensity = intensity / 5
-```
-
-### 7.3 ContentScore
-
-衡量菜谱是否包含用户偏好的食材：
-
-```text
-ContentScore =
-sum(recipe_ingredient_weight * user_favored_ingredient_weight)
-/ sum(recipe_ingredient_weight)
-```
-
-如果没有偏好食材证据，使用中性值 `0.5`。
-
-### 7.4 FeedbackScore
-
-如果只有事件聚合：
-
-```text
-raw_feedback = sum(event_weight)
-FeedbackScore = sigmoid(raw_feedback / 5)
-```
+\[
+FeedbackScore(u,r)=EventScore(u,r)
+\]
 
 如果加载了 BPR 模型：
 
-```text
-FeedbackScore = 0.5 * event_score + 0.5 * bpr_score
-```
+\[
+BPRScore(u,r)=\sigma(P_u^\top Q_r)
+\]
 
-### 7.5 LLMAlignmentScore
+\[
+FeedbackScore(u,r)=clip_{[0,1]}\left(0.5EventScore(u,r)+0.5BPRScore(u,r)\right)
+\]
 
-用户语义向量和菜谱语义向量做余弦相似度：
+其中 \(P_u\) 是 BPR 学到的用户隐向量，\(Q_r\) 是菜谱隐向量。
 
-```text
-LLMAlignmentScore =
-(cosine(user_text_embedding, recipe_text_embedding) + 1) / 2
-```
+食材反馈分不是单独训练得到，而是把包含该食材的菜谱反馈分取平均：
 
-当前默认不是大模型 embedding，而是本地哈希向量。后续可替换为真实中文 embedding 模型或 API。
+\[
+FeedbackScore(u,i)=\frac{1}{|\mathcal{R}(i)|}\sum_{r\in\mathcal{R}(i)}FeedbackScore(u,r)
+\]
 
-### 7.6 QualityScore
+其中 \(\mathcal{R}(i)\) 表示包含食材 \(i\) 且用户有反馈记录的菜谱集合。集合为空时使用 0.5。
 
-```text
-QualityScore = content_status_score * nutrition_tier_score
-```
+### 6.5 语义匹配分
 
-内容完整度：
+系统把用户画像、菜谱信息和食材信息拼接成文本，再通过 embedding provider 得到向量。
 
-```text
-complete = 1.0
-partial  = 0.6
-sparse   = 0.3
-```
+用户文本包含年龄、性别、活动水平、饮食目标、口味、健康目标、运动和偏好食材。
 
-营养可信度：
+菜谱文本包含菜谱名称、描述、菜系、做法、口味标签、食材和营养可信度。
 
-```text
-standard                     = 1.0
-sensitivity_only             = 0.6
-exclude_from_nutrition_model = 0.2
-```
+食材文本包含食材名称、类别、营养状态和来源状态。
 
-### 7.7 DiversityBoost
+语义匹配分为：
 
-Top-K 选择时，系统会降低与已选菜谱过于相似的候选。
+\[
+SemanticScore(u,x)=\frac{\cos(E_u,E_x)+1}{2}
+\]
 
-相似度考虑：
+其中 \(x\) 可以是菜谱 \(r\)，也可以是食材 \(i\)。
 
-```text
-菜系是否相同
-烹饪方式是否重叠
-主食材是否重叠
-```
+当前代码字段名为 `llm_alignment_score`，但默认向量来自本地 HashEmbeddingProvider，不是真实 LLM embedding。只有替换为真实 embedding provider 后，才可以把这一项表述为真实大模型语义分。
 
-计算：
+### 6.6 质量分
 
-```text
-DiversityBoost = 1 - max_similarity_to_selected
-```
+菜谱质量分由内容状态和营养可信度相乘得到：
 
-## 8. BPR 隐式反馈模型
+\[
+QualityScore(r)=ContentStatusScore(r)\cdot NutritionTierScore(r)
+\]
 
-BPR 用于学习用户和菜谱的隐向量。这一部分已经在 `dach_llmrec/bpr.py` 中实现。
+内容状态分：
 
-正反馈：
+| 内容状态 | 分数 |
+| --- | ---: |
+| complete | 1.0 |
+| partial | 0.6 |
+| sparse | 0.3 |
+| 其他或缺失 | 0.5 |
 
-```text
-click
-save
-cook
-```
+营养可信度分：
 
-负反馈：
+| 营养可信度 | 分数 |
+| --- | ---: |
+| standard | 1.0 |
+| sensitivity_only | 0.6 |
+| exclude_from_nutrition_model | 0.2 |
+| 其他或缺失 | 0.5 |
 
-```text
-skip
-dislike
-```
+食材质量分更简单：营养状态为 observed 时取 1.0，否则取 0.6。
 
-训练目标：
+### 6.7 疾病扩展分
 
-```text
-L_BPR = - mean(log sigmoid(score(u, i+) - score(u, i-)))
-```
+疾病扩展分默认关闭。只有调用方显式传入疾病 ID 并启用疾病约束时，该分数才进入综合排序。
+
+菜谱疾病推荐分也由直接信号和食材间接信号组成：
+
+\[
+DirectDisease(r,d)=RecommendRecipe(d,r)
+\]
+
+\[
+IndirectDisease(r,d)=\frac{1}{|I_r|}\sum_{i\in I_r}RecommendIngredient(d,i)
+\]
+
+多疾病 ID 时，直接部分对疾病 ID 取最大值；间接部分对每个食材先取最大疾病推荐强度，再对菜谱食材平均：
+
+\[
+DirectDisease(r)=\max_d RecommendRecipe(d,r)
+\]
+
+\[
+IndirectDisease(r)=\frac{1}{|I_r|}\sum_{i\in I_r}\max_d RecommendIngredient(d,i)
+\]
+
+\[
+DiseaseScore(r)=clip_{[0,1]}\left(0.6DirectDisease(r)+0.4IndirectDisease(r)\right)
+\]
+
+食材疾病推荐分为：
+
+\[
+DiseaseScore(i)=\max_d RecommendIngredient(d,i)
+\]
+
+注意：疾病禁忌项不是低分，而是在硬过滤阶段直接排除；疾病推荐项才进入 DiseaseScore。
+
+### 6.8 多样性增益
+
+多样性只用于菜谱 Top-K 重排。系统计算候选菜谱与已选菜谱的最大相似度，再把相似度转成多样性增益。
+
+两个菜谱的相似度为：
+
+\[
+sim(r,s)=0.4C(r,s)+0.3J(M_r,M_s)+0.3J(G_r,G_s)
+\]
 
 其中：
 
-```text
-i+ 是用户正反馈菜谱
-i- 是用户负反馈或采样负例菜谱
-```
+- \(C(r,s)=1\) 表示两个菜谱菜系相同，否则为 0；
+- \(M_r\) 是菜谱 \(r\) 的做法集合；
+- \(G_r\) 是菜谱 \(r\) 的主食材集合；
+- \(J(\cdot,\cdot)\) 是 Jaccard 相似度。
 
-训练支持：
+候选菜谱的多样性增益为：
 
-```text
---device auto
---device cpu
---device cuda
-```
+\[
+DiversityBoost(r)=1-\max_{s\in Selected}sim(r,s)
+\]
 
-如果指定 `--device cuda` 但没有 CUDA，程序会报错，不会假装使用 GPU。
+如果还没有已选菜谱，则 \(DiversityBoost(r)=1.0\)。
 
-### 8.1 已实现的训练目标
+## 7. 综合排序公式
 
-当前实际训练目标是：
+### 7.1 默认菜谱排序
 
-```text
-L = L_BPR + lambda_reg * L2_regularization
-```
+默认不启用疾病因素时，菜谱综合分为：
 
-BPR 核心损失：
+\[
+\begin{aligned}
+Score(u,r)=&
+0.22PreferenceScore(u,r)
++0.22HealthGoalScore(u,r)\\
+&+0.16ContentScore(u,r)
++0.15FeedbackScore(u,r)\\
+&+0.10SemanticScore(u,r)
++0.10QualityScore(r)\\
+&+0.05DiversityBoost(r)
+\end{aligned}
+\]
 
-```text
-L_BPR = - mean(log sigmoid(s(u,i+) - s(u,i-)))
-```
+### 7.2 启用疾病因素后的菜谱排序
 
-其中：
+显式启用疾病因素后，综合分为：
 
-```text
-s(u,i) = dot(user_embedding[u], item_embedding[i])
-```
+\[
+\begin{aligned}
+Score(u,r)=&
+0.18PreferenceScore(u,r)
++0.18HealthGoalScore(u,r)\\
+&+0.16DiseaseScore(r)
++0.14ContentScore(u,r)\\
+&+0.12FeedbackScore(u,r)
++0.10SemanticScore(u,r)\\
+&+0.08QualityScore(r)
++0.04DiversityBoost(r)
+\end{aligned}
+\]
 
-已实现能力：
+这不是默认路径。当前项目不能从数据库自动推断用户疾病，只能使用调用方显式传入的疾病 ID。
 
-```text
-1. 正负反馈构造。
-2. 随机负采样。
-3. 用户/菜谱 embedding 训练。
-4. CPU、CUDA、auto 设备选择。
-5. .pt 模型保存。
-6. 推荐阶段加载 BPR 模型并融合到 FeedbackScore。
-```
+### 7.3 默认食材排序
 
-### 8.2 论文级多任务损失计划
+默认不启用疾病因素时，食材综合分为：
 
-如果后续要写成更强的论文模型，可以扩展为：
+\[
+\begin{aligned}
+IngredientScore(u,i)=&
+0.25PreferenceScore(u,i)
++0.25HealthGoalScore(u,i)\\
+&+0.20ContentScore(u,i)
++0.10FeedbackScore(u,i)\\
+&+0.10SemanticScore(u,i)
++0.10QualityScore(i)
+\end{aligned}
+\]
 
-```text
-L =
-L_BPR
-+ lambda1 * L_semantic_alignment
-+ lambda2 * L_health_margin
-+ lambda3 * L_safety_penalty
-+ lambda4 * L_regularization
-```
+### 7.4 启用疾病因素后的食材排序
 
-计划含义：
+\[
+\begin{aligned}
+IngredientScore(u,i)=&
+0.18PreferenceScore(u,i)
++0.18HealthGoalScore(u,i)\\
+&+0.18DiseaseScore(i)
++0.18ContentScore(u,i)\\
+&+0.08FeedbackScore(u,i)
++0.10SemanticScore(u,i)\\
+&+0.10QualityScore(i)
+\end{aligned}
+\]
 
-```text
-L_semantic_alignment:
-  约束协同过滤隐向量与用户/菜谱语义 embedding 对齐。
+## 8. 推荐执行步骤
 
-L_health_margin:
-  约束健康目标匹配菜谱的分数高于不匹配菜谱。
+### 8.1 菜谱推荐步骤
 
-L_safety_penalty:
-  对违反疾病禁忌或避免食材约束的候选施加强惩罚。
+1. 读取用户 \(u\) 的 synthetic 画像、口味、健康目标、偏好食材、避免食材、避免菜谱和历史反馈。
+2. 扩展用户健康目标层级，得到 \(H_u\)。
+3. 遍历所有菜谱，先执行硬过滤。
+4. 对通过过滤的每个菜谱计算 PreferenceScore、HealthGoalScore、ContentScore、FeedbackScore、SemanticScore、QualityScore 和初始 DiversityBoost。
+5. 如果启用疾病因素，再计算 DiseaseScore，并使用疾病扩展权重。
+6. 先按当前综合分得到候选池。
+7. 从候选池中贪心选择 Top-K。每选出一个菜谱，就重新计算剩余候选对已选集合的 DiversityBoost，再更新综合分。
+8. 返回 Top-K、综合分、各证据分、命中因素和模板化解释。
 
-L_regularization:
-  防止 embedding 过拟合。
-```
+### 8.2 食材推荐步骤
 
-默认计划参数：
+1. 读取用户画像和用户文本向量。
+2. 遍历所有食材，排除用户避免食材；启用疾病因素时，再排除疾病禁忌食材。
+3. 对每个候选食材计算口味分、健康目标分、内容偏好分、反馈分、语义分和质量分。
+4. 如果启用疾病因素，再计算食材疾病推荐分。
+5. 按综合分排序，返回 Top-K、证据和解释。
 
-```text
-lambda1 = 0.2
-lambda2 = 0.2
-lambda3 = 1.0
-lambda4 = 1e-4
-```
+## 9. BPR 隐式反馈学习
 
-必须明确：`L_semantic_alignment`、`L_health_margin`、`L_safety_penalty` 当前没有在代码中实现，不能在实验结果里声称已经训练这些目标。
+BPR 用于学习用户和菜谱的潜在偏好。它不替代主排序公式，而是作为 FeedbackScore 的一部分参与融合。
 
-## 9. 大模型如何接入
+正反馈事件：click、save、cook。
 
-当前项目没有直接调用大模型 API。原因是为了让 GitHub 项目可复现，不依赖网络和 API key。
+负反馈事件：skip、dislike。
 
-但是代码已经预留接口：
+训练样本是三元组 \((u,r^+,r^-)\)，表示用户 \(u\) 对正样本菜谱 \(r^+\) 的偏好应该高于负样本菜谱 \(r^-\)。
 
-```python
-class EmbeddingProvider:
-    def embed(self, text: str) -> list[float]:
-        ...
-```
+BPR 打分：
 
-后续可以接：
+\[
+\hat{y}_{u,r}=P_u^\top Q_r
+\]
 
-```text
-本地中文 embedding 模型
-OpenAI embedding API
-其他大模型 embedding 服务
-```
+BPR 损失：
 
-接入后，大模型主要承担三件事：
+\[
+L_{BPR}=-\frac{1}{|\mathcal{D}|}\sum_{(u,r^+,r^-)\in\mathcal{D}}\log\sigma(\hat{y}_{u,r^+}-\hat{y}_{u,r^-})
+\]
 
-```text
-用户画像语义增强
-菜谱语义向量生成
-推荐解释文本生成
-```
+其中 \(\mathcal{D}\) 是训练三元组集合。
 
-大模型不应该直接决定最终推荐结果。最终排序仍由可追溯分数计算得到。
+当前训练使用 AdamW，包含优化器权重衰减。模型保存用户索引、菜谱索引、用户隐向量、菜谱隐向量、训练配置和每轮损失。推荐阶段加载模型后，将点积分数经 sigmoid 映射为 \(BPRScore(u,r)\)，再融合到 FeedbackScore。
 
-## 10. 疾病因素如何扩展
+当前没有实现 LightGCN、GAT、DeepFM、Wide&Deep，也没有实现语义对齐损失、健康边界损失或安全惩罚损失。这些只能写成后续增强方向。
 
-当前数据库中疾病表能连接少量食材和菜谱，但没有可靠的用户疾病画像。
+## 10. 评估方法
 
-因此当前主算法使用：
+离线评估采用时间切分。训练反馈满足：
 
-```text
-用户 -> HCI 健康目标 -> 食材/菜谱
-```
+\[
+event\_time < cutoff
+\]
 
-而不是：
+测试正样本满足：
 
-```text
-用户 -> 疾病诊断 -> 食疗推荐
-```
+\[
+event\_time \ge cutoff,\quad event\_type\in\{click,save,cook\}
+\]
 
-如果后续补充可靠用户疾病/风险表，例如：
+默认比较方法包括 popularity、content、bpr_only、dach_no_health、dach_no_llm、dach_no_feedback、dach_no_diversity 和 dach_full。
 
-```text
-user_health_condition(user_id, disease_id, confidence, source, status)
-```
+评估指标包括 Precision@K、Recall@K、NDCG@K、HitRate@K、Coverage、Diversity 和 SafetyViolationRate。
 
-就可以启用：
+因为反馈来自 synthetic 表，评估结果只能称为模拟实验或 demo 验收，不能称为真实用户实验。
 
-```python
-recommend(
-    user_id=1,
-    health_factors=[{"type": "disease", "id": disease_id}],
-    enable_disease_constraints=True,
-)
-```
+## 11. 当前实现状态
 
-启用后：
+已经实现：SQLite 数据读取和 demo 数据生成、用户画像构建、HCI 健康目标层级扩展、菜谱和食材特征构建、硬过滤、菜谱与食材多证据加权公式、HashEmbeddingProvider 离线语义向量、BPR 隐式反馈训练与加载、baseline/消融评估、常见 Top-K 指标，以及基于证据字段的模板化解释。
 
-- `diseaseavoidrecipe` 和 `diseaseavoidingredient` 作为硬过滤；
-- `diseaserecommendrecipe` 和 `diseaserecommendingredient` 进入 `DiseaseScore`。
+未实现，不能声称完成：真实大模型 embedding、大模型解释生成、大模型 reranker、LightGCN/PinSage/GAT/异构图神经网络、Two-Tower/DeepFM/Wide&Deep、真实用户实验、基于真实疾病诊断的个性化推荐、临床营养或疾病治疗建议、多随机种子显著性检验和生产级 API 服务。
 
-## 11. 实验设计
+## 12. 一句话总结
 
-评估采用时间切分：
-
-```text
-训练反馈：event_time < cutoff
-测试正样本：event_time >= cutoff 且 event_type in {click, save, cook}
-```
-
-默认比较方法：
-
-```text
-popularity
-content
-bpr_only
-dach_no_health
-dach_no_llm
-dach_no_feedback
-dach_no_diversity
-dach_full
-```
-
-指标：
-
-```text
-Precision@K
-Recall@K
-NDCG@K
-HitRate@K
-Coverage
-Diversity
-SafetyViolationRate
-```
-
-由于当前反馈是 synthetic，实验结果应写成“模拟用户实验结果”。
-
-## 12. 当前局限
-
-当前项目是可复现研究原型，不是最终生产级系统。
-
-主要局限：
-
-```text
-用户行为是 synthetic，不是真实用户行为
-默认 embedding 不是大模型，只是本地哈希向量
-疾病模块缺少可靠 user -> disease 数据
-营养数据可信度不完全一致，不能作为精准临床营养依据
-BPR 是基础隐式反馈模型，不是完整图神经网络推荐器
-```
-
-后续改进方向：
-
-```text
-接入真实中文 embedding 模型
-在 GPU 上多随机种子训练 BPR
-补充真实用户或人工标注反馈
-补充可靠用户疾病/风险画像后启用疾病模块
-报告消融实验、置信区间和错误分析
-```
-
+当前 DACH-LLMRec 的核心不是让大模型直接推荐菜，而是把健康推荐场景中的安全过滤、结构化健康目标、食材内容、隐式反馈、语义相似度、质量控制和多样性放进一个可解释的排序框架中。它适合作为可复现研究原型；如果要写成正式论文，还需要真实 embedding、完整数据实验、多种强 baseline 和严格统计分析。
