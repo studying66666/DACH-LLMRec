@@ -14,6 +14,7 @@ from .fusion import FusionScorer, fit_recipe_fusion_scorer
 from .itemknn import ItemKNNScorer
 from .paths import DEFAULT_DB_PATH
 from .recommender import DACHLLMRecommender
+from .weight_search import GridSearchWeightScorer, fit_grid_search_weight_scorer
 
 
 POSITIVE_EVENTS = {"click", "save", "cook"}
@@ -51,6 +52,7 @@ def evaluate(
             "als_only",
             "bpr_only",
             "fusion_lr",
+            "dach_grid",
             "dach_no_health",
             "dach_no_llm",
             "dach_no_feedback",
@@ -66,11 +68,12 @@ def evaluate(
             recommender = DACHLLMRecommender(
                 db_path,
                 feedback_before=cutoff,
-                bpr_model_path=bpr_model_path if ranker in {"bpr_only", "fusion_lr", "dach_full", "dach_no_health", "dach_no_llm", "dach_no_feedback", "dach_no_diversity"} else None,
+                bpr_model_path=bpr_model_path if ranker in {"bpr_only", "fusion_lr", "dach_grid", "dach_full", "dach_no_health", "dach_no_llm", "dach_no_feedback", "dach_no_diversity"} else None,
                 disabled_components=_disabled_components_for_ranker(ranker),
             )
             try:
                 fusion_scorer = None
+                grid_scorer = None
                 if ranker == "fusion_lr":
                     try:
                         fusion_scorer, fusion_summary = fit_recipe_fusion_scorer(
@@ -82,6 +85,18 @@ def evaluate(
                     except ValueError as exc:
                         results[ranker] = {"skipped": True, "reason": str(exc)}
                         continue
+                if ranker == "dach_grid":
+                    try:
+                        grid_scorer, grid_summary = fit_grid_search_weight_scorer(
+                            recommender=recommender,
+                            test_positives=test_positives,
+                            user_ids=user_ids,
+                            top_k=top_k,
+                        )
+                        model_summaries[ranker] = grid_summary
+                    except ValueError as exc:
+                        results[ranker] = {"skipped": True, "reason": str(exc)}
+                        continue
                 results[ranker] = _evaluate_ranker(
                     recommender=recommender,
                     user_ids=user_ids,
@@ -90,6 +105,7 @@ def evaluate(
                     ranker=ranker,
                     popularity=popularity,
                     fusion_scorer=fusion_scorer,
+                    grid_scorer=grid_scorer,
                 )
             finally:
                 recommender.close()
@@ -153,6 +169,7 @@ def _evaluate_ranker(
     ranker: str,
     popularity: list[int] | None = None,
     fusion_scorer: FusionScorer | None = None,
+    grid_scorer: GridSearchWeightScorer | None = None,
 ) -> dict[str, float]:
     precision_values = []
     recall_values = []
@@ -212,6 +229,13 @@ def _evaluate_ranker(
             rec_ids = _fusion_lr_for_user(
                 recommender,
                 fusion_scorer,
+                user_id,
+                top_k,
+            )
+        elif ranker == "dach_grid":
+            rec_ids = _dach_grid_for_user(
+                recommender,
+                grid_scorer,
                 user_id,
                 top_k,
             )
@@ -366,6 +390,17 @@ def _fusion_lr_for_user(
         scored.append((recipe_id, score))
     scored.sort(key=lambda item: item[1], reverse=True)
     return [recipe_id for recipe_id, _ in scored[:top_k]]
+
+
+def _dach_grid_for_user(
+    recommender: DACHLLMRecommender,
+    grid_scorer: GridSearchWeightScorer | None,
+    user_id: int,
+    top_k: int,
+) -> list[int]:
+    if grid_scorer is None:
+        return []
+    return grid_scorer.topk(recommender, user_id=user_id, top_k=top_k)
 
 
 def _itemknn_for_user(

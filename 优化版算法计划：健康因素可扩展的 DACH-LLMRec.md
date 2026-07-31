@@ -32,7 +32,7 @@
 
 ## Algorithm
 
-当前算法主线是“硬过滤 + 多证据加权排序 + 菜谱多样性重排”。它不是端到端深度模型，也不是让大模型直接决定排序。
+当前优化后算法主线是“硬过滤 + 多证据加权排序 + 菜谱多样性重排”。默认推荐路径仍保持可解释；离线评估路径新增 ItemKNN、ALS、BPR-only、content_feedback、Logistic Fusion 和 DACH 权重网格搜索，用来验证不同个性化排序器和权重调参策略的效果。它不是端到端深度模型，也不是让大模型直接决定排序。
 
 执行步骤：
 
@@ -103,6 +103,50 @@ $$
 - DiversityBoost：1 减去候选菜谱与已选菜谱在菜系、做法和主食材上的最大相似度。
 - DiseaseScore：仅显式启用疾病 ID 时使用，由疾病推荐菜谱和疾病推荐食材共同计算；疾病禁忌项在硬过滤阶段直接排除。
 
+
+### Optimized Rankers
+
+当前代码已经补充以下优化排序器：
+
+| ranker | 方法 | 当前用途 |
+| --- | --- | --- |
+| `content_feedback` | 0.80 × 内容基线 + 0.20 × 反馈分 | 轻量混合 baseline |
+| `itemknn` | 基于正反馈菜谱共现的物品协同过滤 | 离线对比 |
+| `als_only` | 隐式反馈 ALS 矩阵分解 | 离线对比 |
+| `bpr_only` | 带用户/物品偏置的 BPR | 离线对比，可加载进 DACH 反馈分 |
+| `fusion_lr` | Logistic Regression 学习 evidence 到正反馈概率 | 学习型融合对比 |
+| `dach_grid` | 在验证集上按 NDCG@K 搜索 DACH evidence 权重 | 权重调参对比 |
+
+BPR 优化后打分为：
+
+$$
+BPRScore(u,r)=\sigma(P_u^TQ_r+b_u+b_r)
+$$
+
+Logistic Fusion 输入七个证据分：
+
+$$
+x(u,r)=[PreferenceScore,HealthGoalScore,DiseaseScore,ContentScore,FeedbackScore,SemanticScore,QualityScore]
+$$
+
+输出正反馈概率：
+
+$$
+FusionScore(u,r)=\sigma(\theta^Tx(u,r)+b)
+$$
+
+DACH 网格搜索使用同一组可解释证据项，只学习权重，不改变证据定义：
+
+$$
+Score_w(u,r)=\sum_k w_k f_k(u,r),\quad \sum_k w_k=1
+$$
+
+选择目标为：
+
+$$
+w^*=\arg\max_{w\in\mathcal{W}}(NDCG_K(w), Recall_K(w), Precision_K(w))
+$$
+
 ## LLM Usage
 
 当前实现没有直接调用大模型 API。代码只保留了可替换的 embedding provider 接口，默认使用本地 HashEmbeddingProvider 生成确定性文本向量，便于无网络、无 API key 的复现。
@@ -111,7 +155,7 @@ $$
 
 $$
 \begin{aligned}
-SemanticScore(u,x)=\\frac{\\cos(E_u,E_x)+1}{2}
+SemanticScore(u,x)=\frac{\cos(E_u,E_x)+1}{2}
 \end{aligned}
 $$
 
@@ -127,11 +171,12 @@ $$
 
 $$
 \begin{aligned}
-L=L_{BPR}+\\lambda_1L_{semantic}+\\lambda_2L_{health}+\\lambda_3L_{safety}+\\lambda_4L_{reg}
+L=L_{BPR}+\lambda_1L_{semantic}+\lambda_2L_{health}+\lambda_3L_{safety}+\lambda_4L_{reg}
 \end{aligned}
 $$
 
 其中 $L_{semantic}$ 表示语义对齐约束，$L_{health}$ 表示健康目标排序约束，$L_{safety}$ 表示安全违规惩罚，$L_{reg}$ 表示正则项。当前实际已实现的是 BPR 隐式反馈学习和主排序公式融合。
+
 ## Interfaces
 
 推荐接口：
@@ -199,12 +244,14 @@ recommend(
 
   * Popularity
   * Content-based
-  * Matrix Factorization
-  * BPR
-  * LightGCN
-  * DACH-LLMRec without LLM
+  * Content + Feedback
+  * ItemKNN
+  * ALS-only
+  * BPR-only
+  * Logistic Fusion
+  * DACH Grid Weight Search
   * Full DACH-LLMRec
-* 消融实验：
+* 消融实验:
 
   * 去掉健康目标图。
   * 去掉 LLM 语义对齐。

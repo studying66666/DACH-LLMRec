@@ -62,6 +62,8 @@ def run_all(
         bpr_model_path=bpr_path if bpr_path.exists() else None,
     )
 
+    weight_search = eval_result.get("models", {}).get("dach_grid")
+
     config = {
         "db_path": str(db_path),
         "cutoff": cutoff,
@@ -78,6 +80,7 @@ def run_all(
         "config": config,
         "bpr_summary": bpr_summary,
         "diagnostics": diagnostics,
+        "weight_search": weight_search,
         "evaluation": eval_result,
     }
     (output_dir / "experiment.json").write_text(
@@ -93,6 +96,11 @@ def run_all(
         json.dumps(diagnostics, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    if weight_search is not None:
+        (output_dir / "weight_search.json").write_text(
+            json.dumps(weight_search, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     return output
 
 

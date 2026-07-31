@@ -4,6 +4,7 @@ from dach_llmrec.demo_data import create_demo_database
 from dach_llmrec.diagnostics import diagnose_bpr
 from dach_llmrec.evaluate import evaluate
 from dach_llmrec.experiments.run_all import run_all
+from dach_llmrec.weight_search import grid_search_recipe_weights
 
 
 def _demo_db(tmp_path):
@@ -162,6 +163,53 @@ def test_fusion_lr_evaluation_ranker_runs(tmp_path):
     assert result["models"]["fusion_lr"]["samples"] > 0
 
 
+def test_grid_search_weight_optimizer_reports_validation_ndcg(tmp_path):
+    db_path = _demo_db(tmp_path)
+
+    result = grid_search_recipe_weights(
+        db_path=db_path,
+        cutoff="2026-06-01 00:00:00",
+        top_k=3,
+        max_users=3,
+        grid_step=0.5,
+        max_component_weight=1.0,
+    )
+
+    summary = result["grid_search"]
+    assert summary["selection_metric"] == "ndcg@3"
+    assert summary["validation_users"] > 0
+    assert summary["candidate_weight_count"] > 0
+    assert summary["best_validation_ndcg_at_k"] >= 0.0
+    assert set(summary["best_weights"]) == {
+        "preference",
+        "health_goal",
+        "content",
+        "feedback",
+        "llm_alignment",
+        "quality",
+        "diversity",
+    }
+
+
+def test_dach_grid_evaluation_ranker_runs(tmp_path):
+    db_path = _demo_db(tmp_path)
+
+    result = evaluate(
+        db_path=db_path,
+        cutoff="2026-06-01 00:00:00",
+        top_k=3,
+        max_users=3,
+        rankers=["dach_grid"],
+    )
+
+    assert result["metadata"]["evaluated_users"] > 0
+    assert "dach_grid" in result["results"]
+    assert not result["results"]["dach_grid"].get("skipped")
+    assert result["results"]["dach_grid"]["ndcg_at_k"] >= 0.0
+    assert result["results"]["dach_grid"]["safety_violation_rate"] == 0.0
+    assert result["models"]["dach_grid"]["best_validation_ndcg_at_k"] >= 0.0
+
+
 def test_run_all_demo_experiment_writes_outputs(tmp_path):
     output_dir = tmp_path / "experiment"
     result = run_all(
@@ -178,10 +226,13 @@ def test_run_all_demo_experiment_writes_outputs(tmp_path):
     assert (output_dir / "experiment.json").exists()
     assert (output_dir / "metrics.csv").exists()
     assert (output_dir / "diagnostics.json").exists()
+    assert (output_dir / "weight_search.json").exists()
     assert "dach_full" in result["evaluation"]["results"]
     assert "content" in result["evaluation"]["results"]
     assert "itemknn" in result["evaluation"]["results"]
     assert "als_only" in result["evaluation"]["results"]
     assert "fusion_lr" in result["evaluation"]["results"]
+    assert "dach_grid" in result["evaluation"]["results"]
     assert "diagnostics" in result
+    assert result["weight_search"]["best_validation_ndcg_at_k"] >= 0.0
 

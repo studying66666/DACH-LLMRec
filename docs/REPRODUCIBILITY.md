@@ -118,6 +118,14 @@ python -m dach_llmrec.evaluate --cutoff "2026-06-01 00:00:00" --top-k 10 --max-u
 python -m dach_llmrec.experiments.run_all --db handoff_database_completed_20260729/dietrecommendation_no_empty_enhanced.sqlite --output-dir artifacts/experiment_001 --device cuda --bpr-epochs 20 --bpr-dim 64 --top-k 10 --max-users 500
 ```
 
+DACH 权重网格搜索：
+
+```bash
+python -m dach_llmrec.weight_search --db handoff_database_completed_20260729/dietrecommendation_no_empty_enhanced.sqlite --cutoff "2026-06-01 00:00:00" --top-k 10 --max-users 500 --bpr-model artifacts/dach_bpr_gpu.pt --output artifacts/weight_search.json
+```
+
+该命令会输出默认权重指标、最优权重、最优验证集指标和排名靠前的候选权重组合。
+
 demo 数据一键实验：
 
 ```bash
@@ -141,7 +149,12 @@ SafetyViolationRate
 ```text
 popularity
 content
+content_feedback
+itemknn
+als_only
 bpr_only
+fusion_lr
+dach_grid
 dach_no_health
 dach_no_llm
 dach_no_feedback
@@ -149,6 +162,7 @@ dach_no_diversity
 dach_full
 ```
 
+其中 `itemknn`、`als_only`、`fusion_lr`、`dach_grid` 是优化后新增的离线对比 ranker；`fusion_lr` 会在 cutoff 前 synthetic 反馈上训练逻辑回归融合模型，`dach_grid` 会在验证集上按 `NDCG@K` 搜索 DACH evidence 权重。
 注意：当前评估基于 `norm_synthetic_feedback_event_v1`，只能表述为模拟用户实验，不能表述为真实用户验证。
 
 ## 6. 测试
