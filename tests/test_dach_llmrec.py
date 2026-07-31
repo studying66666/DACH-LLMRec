@@ -106,6 +106,7 @@ def test_itemknn_evaluation_ranker_runs(tmp_path):
     assert result["metadata"]["evaluated_users"] > 0
     assert "itemknn" in result["results"]
     assert result["results"]["itemknn"]["coverage"] >= 0.0
+    assert result["results"]["itemknn"]["safety_violation_rate"] == 0.0
 
 def test_run_all_demo_experiment_writes_outputs(tmp_path):
     output_dir = tmp_path / "experiment"

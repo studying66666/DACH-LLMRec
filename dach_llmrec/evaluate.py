@@ -276,15 +276,21 @@ def _itemknn_for_user(
 ) -> list[int]:
     if itemknn_scorer is None:
         return []
+    profile = recommender._load_user_profile(user_id)
     seen_recipe_ids = {
         recipe_id
         for seen_user_id, recipe_id in recommender.recipe_feedback
         if seen_user_id == user_id
     }
+    filtered_candidate_recipe_ids = [
+        recipe_id
+        for recipe_id in candidate_recipe_ids
+        if recommender._passes_recipe_filters(recipe_id, profile, [])
+    ]
     return itemknn_scorer.topk(
         user_id=user_id,
         top_k=top_k,
-        candidate_recipe_ids=candidate_recipe_ids,
+        candidate_recipe_ids=filtered_candidate_recipe_ids,
         exclude_recipe_ids=seen_recipe_ids,
     )
 
