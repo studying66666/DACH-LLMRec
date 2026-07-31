@@ -1,0 +1,29 @@
+dossier: "DACH-LLMRec publication upgrade"
+generated: "2026-07-31"
+run_type: "screening-grade topic selection based on supplied references, web verification, and local project inspection"
+recall:
+  tool: "manual web search plus local project inspection"
+  query_phrasings: 18
+  dossier_confidence: medium
+  note: "Not a systematic review; strongest direct competitor found is MOPI-HFRS KDD 2025."
+gaps:
+  - id: G1
+    name: "Longitudinal constraint-faithful nutrition recommendation"
+    statement: "Upgrade DACH-LLMRec into a sequence-aware, long-term health-constrained recipe recommendation framework that distills collaborative/sequential user representations into LLM-readable semantic states, optimizes preference-health-diversity over a multi-meal horizon, and generates explanations only from verified model evidence."
+    type: A
+    open: partially-occupied
+    open_confidence: medium
+    dead_end_status: genuinely-open
+    dead_end_evidence: "Closest works separately cover collaborative LLMRec, sequential LLMRec, graph health-aware recommendation, constrained orchestration, and faithful explanation, but no verified work was found combining all four for recipe/nutrition recommendation."
+    contribution_type: problem-solving
+    feasibility: feasible-with-effort
+    verdict: conditional-go
+    verdict_reason: "Promising only if the project adds real external interaction data, sequence modeling, hard nutrition constraints, and explanation-fidelity evaluation beyond the current synthetic prototype."
+open_questions:
+  - id: Q1
+    text: "Can Food.com/Recipe1M+ plus the local DACH database be legally and technically aligned into a reproducible benchmark with credible nutrition labels?"
+  - id: Q2
+    text: "Can the project obtain any small real-user or dietitian evaluation without making clinical claims?"
+  - id: Q3
+    text: "Which target should be primary: Information Fusion / Expert Systems with Applications / Knowledge-Based Systems / IEEE TKDE?"
+
