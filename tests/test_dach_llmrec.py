@@ -2,6 +2,7 @@ from dach_llmrec import DACHLLMRecommender
 from dach_llmrec.bpr import train_bpr
 from dach_llmrec.demo_data import create_demo_database
 from dach_llmrec.diagnostics import diagnose_bpr
+from dach_llmrec.evaluate import evaluate
 from dach_llmrec.experiments.run_all import run_all
 
 
@@ -91,6 +92,21 @@ def test_bpr_diagnostics_report_train_test_coverage(tmp_path):
     assert not result["bpr_top_k"]["skipped"]
     assert "history_overlap_rate" in result["bpr_top_k"]
 
+def test_itemknn_evaluation_ranker_runs(tmp_path):
+    db_path = _demo_db(tmp_path)
+
+    result = evaluate(
+        db_path=db_path,
+        cutoff="2026-06-01 00:00:00",
+        top_k=3,
+        max_users=3,
+        rankers=["itemknn"],
+    )
+
+    assert result["metadata"]["evaluated_users"] > 0
+    assert "itemknn" in result["results"]
+    assert result["results"]["itemknn"]["coverage"] >= 0.0
+
 def test_run_all_demo_experiment_writes_outputs(tmp_path):
     output_dir = tmp_path / "experiment"
     result = run_all(
@@ -108,4 +124,5 @@ def test_run_all_demo_experiment_writes_outputs(tmp_path):
     assert (output_dir / "metrics.csv").exists()
     assert "dach_full" in result["evaluation"]["results"]
     assert "content" in result["evaluation"]["results"]
+    assert "itemknn" in result["evaluation"]["results"]
 

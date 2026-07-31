@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .constants import FEEDBACK_WEIGHTS
+from .itemknn import ItemKNNScorer
 from .paths import DEFAULT_DB_PATH
 from .recommender import DACHLLMRecommender
 
@@ -43,6 +44,7 @@ def evaluate(
         rankers = rankers or [
             "popularity",
             "content",
+            "itemknn",
             "bpr_only",
             "dach_no_health",
             "dach_no_llm",
@@ -139,6 +141,14 @@ def _evaluate_ranker(
     returned = 0
     catalog_hits: set[int] = set()
     diversity_values = []
+    itemknn_scorer = None
+    itemknn_candidate_recipe_ids: list[int] | None = None
+    if ranker == "itemknn":
+        itemknn_scorer = ItemKNNScorer.from_feedback(
+            recipe_ids=sorted(recommender.recipes),
+            recipe_feedback=recommender.recipe_feedback,
+        )
+        itemknn_candidate_recipe_ids = sorted(itemknn_scorer.recipe_to_index)
 
     for user_id in user_ids:
         positives = test_positives[user_id]
@@ -149,6 +159,14 @@ def _evaluate_ranker(
             rec_ids = _popularity_for_user(recommender, user_id, popularity or [], top_k)
         elif ranker == "content":
             rec_ids = _content_for_user(recommender, user_id, top_k)
+        elif ranker == "itemknn":
+            rec_ids = _itemknn_for_user(
+                recommender,
+                itemknn_scorer,
+                user_id,
+                top_k,
+                itemknn_candidate_recipe_ids or [],
+            )
         elif ranker == "bpr_only":
             rec_ids = _bpr_only_for_user(recommender, user_id, top_k)
         else:
@@ -242,6 +260,28 @@ def _bpr_only_for_user(
         if recipe_id in recommender.bpr_scorer.recipe_to_index
     ]
     return recommender.bpr_scorer.topk(
+        user_id=user_id,
+        top_k=top_k,
+        candidate_recipe_ids=candidate_recipe_ids,
+        exclude_recipe_ids=seen_recipe_ids,
+    )
+
+
+def _itemknn_for_user(
+    recommender: DACHLLMRecommender,
+    itemknn_scorer: ItemKNNScorer | None,
+    user_id: int,
+    top_k: int,
+    candidate_recipe_ids: list[int],
+) -> list[int]:
+    if itemknn_scorer is None:
+        return []
+    seen_recipe_ids = {
+        recipe_id
+        for seen_user_id, recipe_id in recommender.recipe_feedback
+        if seen_user_id == user_id
+    }
+    return itemknn_scorer.topk(
         user_id=user_id,
         top_k=top_k,
         candidate_recipe_ids=candidate_recipe_ids,
