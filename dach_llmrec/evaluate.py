@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .constants import FEEDBACK_WEIGHTS
+from .als import ALSScorer
 from .itemknn import ItemKNNScorer
 from .paths import DEFAULT_DB_PATH
 from .recommender import DACHLLMRecommender
@@ -44,7 +45,9 @@ def evaluate(
         rankers = rankers or [
             "popularity",
             "content",
+            "content_feedback",
             "itemknn",
+            "als_only",
             "bpr_only",
             "dach_no_health",
             "dach_no_llm",
@@ -143,12 +146,20 @@ def _evaluate_ranker(
     diversity_values = []
     itemknn_scorer = None
     itemknn_candidate_recipe_ids: list[int] | None = None
+    als_scorer = None
+    als_candidate_recipe_ids: list[int] | None = None
     if ranker == "itemknn":
         itemknn_scorer = ItemKNNScorer.from_feedback(
             recipe_ids=sorted(recommender.recipes),
             recipe_feedback=recommender.recipe_feedback,
         )
         itemknn_candidate_recipe_ids = sorted(itemknn_scorer.recipe_to_index)
+    if ranker in {"als", "als_only"}:
+        als_scorer = ALSScorer.from_feedback(
+            recipe_ids=sorted(recommender.recipes),
+            recipe_feedback=recommender.recipe_feedback,
+        )
+        als_candidate_recipe_ids = sorted(als_scorer.recipe_to_index)
 
     for user_id in user_ids:
         positives = test_positives[user_id]
@@ -159,6 +170,8 @@ def _evaluate_ranker(
             rec_ids = _popularity_for_user(recommender, user_id, popularity or [], top_k)
         elif ranker == "content":
             rec_ids = _content_for_user(recommender, user_id, top_k)
+        elif ranker == "content_feedback":
+            rec_ids = _content_feedback_for_user(recommender, user_id, top_k)
         elif ranker == "itemknn":
             rec_ids = _itemknn_for_user(
                 recommender,
@@ -166,6 +179,14 @@ def _evaluate_ranker(
                 user_id,
                 top_k,
                 itemknn_candidate_recipe_ids or [],
+            )
+        elif ranker in {"als", "als_only"}:
+            rec_ids = _als_for_user(
+                recommender,
+                als_scorer,
+                user_id,
+                top_k,
+                als_candidate_recipe_ids or [],
             )
         elif ranker == "bpr_only":
             rec_ids = _bpr_only_for_user(recommender, user_id, top_k)
@@ -242,6 +263,28 @@ def _content_for_user(
     return [recipe_id for recipe_id, _ in scored[:top_k]]
 
 
+def _content_feedback_for_user(
+    recommender: DACHLLMRecommender,
+    user_id: int,
+    top_k: int,
+) -> list[int]:
+    profile = recommender._load_user_profile(user_id)
+    scored = []
+    for recipe_id, recipe in recommender.recipes.items():
+        if not recommender._passes_recipe_filters(recipe_id, profile, []):
+            continue
+        evidence = recommender._recipe_evidence(profile, recipe_id, [])
+        content_score = (
+            0.45 * evidence["preference_score"]
+            + 0.35 * evidence["content_score"]
+            + 0.20 * evidence["quality_score"]
+        )
+        score = 0.80 * content_score + 0.20 * evidence["feedback_score"]
+        scored.append((recipe_id, score))
+    scored.sort(key=lambda item: item[1], reverse=True)
+    return [recipe_id for recipe_id, _ in scored[:top_k]]
+
+
 def _bpr_only_for_user(
     recommender: DACHLLMRecommender,
     user_id: int,
@@ -288,6 +331,34 @@ def _itemknn_for_user(
         if recommender._passes_recipe_filters(recipe_id, profile, [])
     ]
     return itemknn_scorer.topk(
+        user_id=user_id,
+        top_k=top_k,
+        candidate_recipe_ids=filtered_candidate_recipe_ids,
+        exclude_recipe_ids=seen_recipe_ids,
+    )
+
+
+def _als_for_user(
+    recommender: DACHLLMRecommender,
+    als_scorer: ALSScorer | None,
+    user_id: int,
+    top_k: int,
+    candidate_recipe_ids: list[int],
+) -> list[int]:
+    if als_scorer is None:
+        return []
+    profile = recommender._load_user_profile(user_id)
+    seen_recipe_ids = {
+        recipe_id
+        for seen_user_id, recipe_id in recommender.recipe_feedback
+        if seen_user_id == user_id
+    }
+    filtered_candidate_recipe_ids = [
+        recipe_id
+        for recipe_id in candidate_recipe_ids
+        if recommender._passes_recipe_filters(recipe_id, profile, [])
+    ]
+    return als_scorer.topk(
         user_id=user_id,
         top_k=top_k,
         candidate_recipe_ids=filtered_candidate_recipe_ids,

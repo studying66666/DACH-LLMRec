@@ -108,6 +108,38 @@ def test_itemknn_evaluation_ranker_runs(tmp_path):
     assert result["results"]["itemknn"]["coverage"] >= 0.0
     assert result["results"]["itemknn"]["safety_violation_rate"] == 0.0
 
+def test_content_feedback_hybrid_ranker_runs(tmp_path):
+    db_path = _demo_db(tmp_path)
+
+    result = evaluate(
+        db_path=db_path,
+        cutoff="2026-06-01 00:00:00",
+        top_k=3,
+        max_users=3,
+        rankers=["content_feedback"],
+    )
+
+    assert result["metadata"]["evaluated_users"] > 0
+    assert "content_feedback" in result["results"]
+    assert result["results"]["content_feedback"]["coverage"] >= 0.0
+    assert result["results"]["content_feedback"]["safety_violation_rate"] == 0.0
+
+def test_als_evaluation_ranker_runs(tmp_path):
+    db_path = _demo_db(tmp_path)
+
+    result = evaluate(
+        db_path=db_path,
+        cutoff="2026-06-01 00:00:00",
+        top_k=3,
+        max_users=3,
+        rankers=["als_only"],
+    )
+
+    assert result["metadata"]["evaluated_users"] > 0
+    assert "als_only" in result["results"]
+    assert result["results"]["als_only"]["coverage"] >= 0.0
+    assert result["results"]["als_only"]["safety_violation_rate"] == 0.0
+
 def test_run_all_demo_experiment_writes_outputs(tmp_path):
     output_dir = tmp_path / "experiment"
     result = run_all(
@@ -126,4 +158,5 @@ def test_run_all_demo_experiment_writes_outputs(tmp_path):
     assert "dach_full" in result["evaluation"]["results"]
     assert "content" in result["evaluation"]["results"]
     assert "itemknn" in result["evaluation"]["results"]
+    assert "als_only" in result["evaluation"]["results"]
 
