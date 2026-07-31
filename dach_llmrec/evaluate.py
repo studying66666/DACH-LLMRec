@@ -231,23 +231,22 @@ def _bpr_only_for_user(
 ) -> list[int]:
     if recommender.bpr_scorer is None:
         return []
-    profile = recommender._load_user_profile(user_id)
     seen_recipe_ids = {
         recipe_id
         for seen_user_id, recipe_id in recommender.recipe_feedback
         if seen_user_id == user_id
     }
-    scored = []
-    for recipe_id in recommender.recipes:
-        if recipe_id in seen_recipe_ids:
-            continue
-        if not recommender._passes_recipe_filters(recipe_id, profile, []):
-            continue
-        score = recommender.bpr_scorer.score(user_id, recipe_id)
-        if score is not None:
-            scored.append((recipe_id, score))
-    scored.sort(key=lambda item: item[1], reverse=True)
-    return [recipe_id for recipe_id, _ in scored[:top_k]]
+    candidate_recipe_ids = [
+        recipe_id
+        for recipe_id in recommender.recipes
+        if recipe_id in recommender.bpr_scorer.recipe_to_index
+    ]
+    return recommender.bpr_scorer.topk(
+        user_id=user_id,
+        top_k=top_k,
+        candidate_recipe_ids=candidate_recipe_ids,
+        exclude_recipe_ids=seen_recipe_ids,
+    )
 
 
 def _safety_violations_for_rec_ids(

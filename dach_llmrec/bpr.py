@@ -64,6 +64,41 @@ class BPRScorer:
         ) + self.user_bias[user_index] + self.item_bias[recipe_index]
         return torch.sigmoid(raw).item()
 
+    def topk(
+        self,
+        user_id: int,
+        top_k: int = 10,
+        candidate_recipe_ids: list[int] | None = None,
+        exclude_recipe_ids: set[int] | None = None,
+    ) -> list[int]:
+        user_index = self.user_to_index.get(user_id)
+        if user_index is None:
+            return []
+        candidate_recipe_ids = candidate_recipe_ids or list(self.recipe_to_index)
+        filtered_recipe_ids: list[int] = []
+        candidate_indices: list[int] = []
+        for recipe_id in candidate_recipe_ids:
+            if exclude_recipe_ids and recipe_id in exclude_recipe_ids:
+                continue
+            recipe_index = self.recipe_to_index.get(recipe_id)
+            if recipe_index is None:
+                continue
+            filtered_recipe_ids.append(recipe_id)
+            candidate_indices.append(recipe_index)
+        if not filtered_recipe_ids:
+            return []
+
+        device = self.recipe_embeddings.device
+        index_tensor = torch.as_tensor(candidate_indices, dtype=torch.long, device=device)
+        user_vec = self.user_embeddings[user_index].unsqueeze(0)
+        item_vecs = self.recipe_embeddings.index_select(0, index_tensor)
+        raw = (item_vecs * user_vec).sum(dim=1)
+        raw = raw + self.user_bias[user_index] + self.item_bias.index_select(0, index_tensor)
+        scores = torch.sigmoid(raw)
+        top_n = min(top_k, scores.shape[0])
+        top_indices = torch.topk(scores, k=top_n).indices.tolist()
+        return [filtered_recipe_ids[idx] for idx in top_indices]
+
 
 class BPRModel(nn.Module):
     def __init__(self, num_users: int, num_items: int, dim: int) -> None:

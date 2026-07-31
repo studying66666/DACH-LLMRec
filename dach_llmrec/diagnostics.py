@@ -344,22 +344,17 @@ def _bpr_top_k_for_user(
     top_k: int,
     seen_recipe_ids: set[int] | None = None,
 ) -> list[int]:
-    try:
-        profile = recommender._load_user_profile(user_id)
-    except ValueError:
-        return []
-
-    scored: list[tuple[int, float]] = []
-    for recipe_id in recommender.recipes:
-        if seen_recipe_ids and recipe_id in seen_recipe_ids:
-            continue
-        if not recommender._passes_recipe_filters(recipe_id, profile, []):
-            continue
-        score = scorer.score(user_id, recipe_id)
-        if score is not None:
-            scored.append((recipe_id, score))
-    scored.sort(key=lambda item: item[1], reverse=True)
-    return [recipe_id for recipe_id, _ in scored[:top_k]]
+    candidate_recipe_ids = [
+        recipe_id
+        for recipe_id in recommender.recipes
+        if recipe_id in scorer.recipe_to_index
+    ]
+    return scorer.topk(
+        user_id=user_id,
+        top_k=top_k,
+        candidate_recipe_ids=candidate_recipe_ids,
+        exclude_recipe_ids=seen_recipe_ids,
+    )
 
 
 def _count_items(items_by_user: dict[int, set[int]]) -> int:
