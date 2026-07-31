@@ -2,8 +2,30 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sqlite3
+from datetime import datetime, timedelta
 from pathlib import Path
+
+
+GENERATOR_VERSION = 'demo-score-v2'
+
+
+def _clip01(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
+def _score_to_event_type(score: float, rng: random.Random) -> str:
+    noisy_score = _clip01(score + rng.uniform(-0.06, 0.06))
+    if noisy_score >= 0.82:
+        return 'cook'
+    if noisy_score >= 0.68:
+        return 'save'
+    if noisy_score >= 0.54:
+        return 'click'
+    if noisy_score >= 0.40:
+        return 'skip'
+    return 'dislike'
 
 
 def create_demo_database(output: str | Path) -> Path:
@@ -257,7 +279,137 @@ def _insert_demo_rows(conn: sqlite3.Connection) -> None:
     conn.executemany("INSERT INTO diseaseavoidrecipe VALUES (?,?,?,?,?,?)", [(1, "", "", 100, 3, 5)])
     conn.executemany("INSERT INTO diseaseavoidingredient VALUES (?,?,?,?,?,?)", [(1, "", "", 100, 5, 5)])
     conn.executemany("INSERT INTO diseaserecommendrecipe VALUES (?,?,?,?,?,?)", [(1, "", "", 100, 4, 4)])
-    conn.executemany("INSERT INTO diseaserecommendingredient VALUES (?,?,?,?,?,?)", [(1, "", "", 100, 6, 4)])
+    recipe_ingredient_map = {
+        1: {1: 1.0, 2: 1.0},
+        2: {3: 1.0, 4: 0.5},
+        3: {5: 1.0},
+        4: {6: 1.0, 7: 0.5},
+        5: {5: 1.0},
+    }
+    ingredient_taste_map = {1: (3,), 2: (7,), 3: (7,), 4: (7,), 5: (5,), 6: (1,), 7: (1,)}
+    recipe_health_map = {1: {}, 2: {19: 0.85}, 3: {}, 4: {9: 0.80}, 5: {}}
+    recipe_quality_map = {1: 0.96, 2: 0.93, 3: 0.58, 4: 0.91, 5: 0.18}
+    profile_specs = [
+        (4, 29, 'female', 'moderate', 'fat_loss', {1: 2, 3: 1, 7: 2, 5: -2}, [(19, 1, 0), (9, 2, 0)], (1, 4, 45, 'moderate'), {1: 5, 2: 4, 4: 4, 6: 5, 7: 4}, {5: 5}, {3: 5}),
+        (5, 34, 'male', 'high', 'muscle_gain', {1: 1, 3: 2, 7: 1, 5: -1}, [(19, 1, 0)], (1, 5, 50, 'high'), {2: 5, 3: 5, 4: 4, 6: 5}, {5: 5}, {3: 5}),
+        (6, 41, 'female', 'high', 'endurance', {1: 1, 3: 1, 7: 2, 5: -1}, [(9, 1, 0), (19, 2, 0)], (1, 4, 55, 'high'), {1: 5, 2: 4, 4: 5, 6: 5, 7: 5}, {5: 4}, {3: 5}),
+        (7, 26, 'male', 'light', 'light_meal', {1: 2, 7: 2, 3: 1, 5: -2}, [(9, 1, 0)], (1, 3, 35, 'light'), {1: 5, 2: 4, 4: 5, 6: 4, 7: 4}, {5: 5}, {3: 5}),
+        (8, 37, 'female', 'moderate', 'comfort_food', {5: 2, 3: 1, 7: -1, 1: 0}, [(19, 2, 0)], (1, 2, 30, 'moderate'), {5: 5, 3: 4, 2: 2}, {1: 3, 4: 2, 6: 2, 7: 2}, {1: 4}),
+        (9, 45, 'male', 'moderate', 'gut_health', {1: 1, 3: 1, 7: 2, 5: -1}, [(9, 1, 0), (19, 2, 0)], (1, 4, 40, 'moderate'), {1: 5, 2: 4, 4: 5, 6: 5, 7: 4}, {5: 4}, {3: 5}),
+        (10, 31, 'female', 'high', 'recovery', {1: 1, 3: 2, 7: 1, 5: -1}, [(19, 1, 0)], (1, 4, 50, 'high'), {1: 4, 2: 5, 4: 4, 6: 5, 7: 4}, {5: 5}, {3: 5}),
+        (11, 28, 'male', 'moderate', 'metabolic_balance', {1: 2, 3: 1, 7: 2, 5: -2}, [(9, 1, 0)], (1, 4, 45, 'moderate'), {1: 5, 2: 4, 4: 5, 6: 5, 7: 4}, {5: 5}, {3: 5}),
+    ]
+
+    next_user_id = 4
+    next_fondness_id = 4
+    next_avoid_ing_id = 2
+    next_avoid_recipe_id = 2
+    next_event_id = 8
+    supplemental_user_rows = []
+    supplemental_taste_rows = []
+    supplemental_health_rows = []
+    supplemental_sport_rows = []
+    supplemental_fondness_rows = []
+    supplemental_avoid_ingredient_rows = []
+    supplemental_avoid_recipe_rows = []
+    supplemental_feedback_rows = []
+
+    def _recipe_score(spec: tuple, recipe_id: int, rng: random.Random) -> float:
+        _, _, _, _, _, taste_prefs, health_goals, _, favored_ingredients, avoid_ingredients, _ = spec
+        ingredients = recipe_ingredient_map[recipe_id]
+        taste_terms = []
+        for ingredient_id, weight in ingredients.items():
+            for taste_id in ingredient_taste_map.get(ingredient_id, ()):
+                taste_terms.append((taste_prefs.get(taste_id, 0) / 2.0) * weight)
+        taste_score = _clip01(0.55 + 0.14 * (sum(taste_terms) / len(taste_terms) if taste_terms else 0.0))
+
+        health_best = 0.0
+        for hci_id, priority, _ in health_goals:
+            target = recipe_health_map.get(recipe_id, {}).get(hci_id, 0.0)
+            health_best = max(health_best, (1.0 / priority) * target)
+        health_score = _clip01(0.45 + 0.30 * health_best) if health_goals else 0.5
+
+        denominator = sum(ingredients.values()) or 1.0
+        content_score = 0.0
+        for ingredient_id, weight in ingredients.items():
+            content_score += weight * (favored_ingredients.get(ingredient_id, 0) / 5.0)
+        content_score = content_score / denominator
+        content_score -= 0.12 * sum(weight for ingredient_id, weight in ingredients.items() if ingredient_id in avoid_ingredients)
+        content_score = _clip01(content_score)
+
+        quality_score = recipe_quality_map.get(recipe_id, 0.5)
+        total = 0.33 * taste_score + 0.25 * health_score + 0.27 * content_score + 0.15 * quality_score
+        total += rng.uniform(-0.05, 0.05)
+        return _clip01(total)
+
+    candidate_recipes = [1, 2, 3, 4]
+    base_time = datetime(2026, 6, 10, 8, 0, 0)
+
+    for spec in profile_specs:
+        user_id, age_years, sex, activity_level, diet_goal, taste_prefs, health_goals, sport, favored_ingredients, avoid_ingredients, avoid_recipes = spec
+        rng = random.Random(20260731 + user_id * 97)
+        supplemental_user_rows.append((user_id, age_years, sex, activity_level, diet_goal, 'synthetic', GENERATOR_VERSION, 20260731 + user_id))
+        for taste_id, preference in taste_prefs.items():
+            supplemental_taste_rows.append((user_id, taste_id, preference, 'synthetic'))
+        for hci_id, priority, is_clinical_diagnosis in health_goals:
+            supplemental_health_rows.append((user_id, hci_id, priority, is_clinical_diagnosis, 'synthetic'))
+        sport_id, sessions_per_week, minutes_per_session, intensity = sport
+        supplemental_sport_rows.append((user_id, sport_id, sessions_per_week, minutes_per_session, intensity, 'synthetic'))
+        for ingredient_id, intensity in favored_ingredients.items():
+            supplemental_fondness_rows.append((next_fondness_id, '', '', user_id, ingredient_id, intensity))
+            next_fondness_id += 1
+        for ingredient_id, intensity in avoid_ingredients.items():
+            supplemental_avoid_ingredient_rows.append((next_avoid_ing_id, '', '', user_id, ingredient_id, intensity))
+            next_avoid_ing_id += 1
+        for recipe_id, intensity in avoid_recipes.items():
+            supplemental_avoid_recipe_rows.append((next_avoid_recipe_id, '', '', user_id, recipe_id, intensity))
+            next_avoid_recipe_id += 1
+
+        for impression_idx in range(30):
+            scores = {recipe_id: _recipe_score(spec, recipe_id, rng) for recipe_id in candidate_recipes}
+            ranked = sorted(candidate_recipes, key=lambda recipe_id: scores[recipe_id], reverse=True)
+            chosen_recipe_id = rng.choices(ranked, weights=[max(0.05, scores[recipe_id]) for recipe_id in ranked], k=1)[0]
+            chosen_score = scores[chosen_recipe_id]
+            rank_position = ranked.index(chosen_recipe_id) + 1
+            impression_time = base_time + timedelta(days=user_id - 4, hours=impression_idx)
+            supplemental_feedback_rows.append((next_event_id, user_id, chosen_recipe_id, 'impression', impression_time.strftime('%Y-%m-%d %H:%M:%S'), rank_position, 'synthetic', GENERATOR_VERSION))
+            next_event_id += 1
+            follow_up_type = _score_to_event_type(chosen_score, rng)
+            supplemental_feedback_rows.append((next_event_id, user_id, chosen_recipe_id, follow_up_type, (impression_time + timedelta(minutes=1)).strftime('%Y-%m-%d %H:%M:%S'), rank_position, 'synthetic', GENERATOR_VERSION))
+            next_event_id += 1
+
+    conn.executemany(
+        "INSERT INTO norm_synthetic_user_v1 VALUES (?,?,?,?,?,?,?,?)",
+        supplemental_user_rows,
+    )
+    conn.executemany(
+        "INSERT INTO norm_synthetic_user_taste_v1 VALUES (?,?,?,?)",
+        supplemental_taste_rows,
+    )
+    conn.executemany(
+        "INSERT INTO norm_synthetic_user_health_goal_v1 VALUES (?,?,?,?,?)",
+        supplemental_health_rows,
+    )
+    conn.executemany(
+        "INSERT INTO norm_synthetic_user_sport_v1 VALUES (?,?,?,?,?,?)",
+        supplemental_sport_rows,
+    )
+    conn.executemany(
+        "INSERT INTO userfondnessingredient VALUES (?,?,?,?,?,?)",
+        supplemental_fondness_rows,
+    )
+    conn.executemany(
+        "INSERT INTO useravoidingredient VALUES (?,?,?,?,?,?)",
+        supplemental_avoid_ingredient_rows,
+    )
+    conn.executemany(
+        "INSERT INTO useravoidrecipe VALUES (?,?,?,?,?,?)",
+        supplemental_avoid_recipe_rows,
+    )
+    conn.executemany(
+        "INSERT INTO norm_synthetic_feedback_event_v1 VALUES (?,?,?,?,?,?,?,?)",
+        supplemental_feedback_rows,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

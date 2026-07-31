@@ -185,6 +185,8 @@ python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_
 
 ```bash
 python -m dach_llmrec.demo_data --output data/demo.sqlite
+
+这个命令会重建 data/demo.sqlite，并用口味、健康目标、内容和质量分数驱动的 synthetic 反馈替换旧的手工样本。
 ```
 
 菜谱推荐：
