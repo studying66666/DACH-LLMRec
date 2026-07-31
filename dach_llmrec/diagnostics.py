@@ -211,6 +211,36 @@ def _diagnose_bpr_top_k(
     if scorer is None:
         return {"skipped": True, "reason": "BPR scorer could not be loaded."}
 
+    raw = _summarize_bpr_top_k(
+        recommender=recommender,
+        scorer=scorer,
+        eval_user_ids=eval_user_ids,
+        test_positives=test_positives,
+        training_interactions=training_interactions,
+        top_k=top_k,
+        exclude_seen=False,
+    )
+    raw["exclude_seen"] = _summarize_bpr_top_k(
+        recommender=recommender,
+        scorer=scorer,
+        eval_user_ids=eval_user_ids,
+        test_positives=test_positives,
+        training_interactions=training_interactions,
+        top_k=top_k,
+        exclude_seen=True,
+    )
+    return raw
+
+
+def _summarize_bpr_top_k(
+    recommender: DACHLLMRecommender,
+    scorer: BPRScorer,
+    eval_user_ids: list[int],
+    test_positives: dict[int, set[int]],
+    training_interactions: dict[str, dict[int, set[int]]],
+    top_k: int,
+    exclude_seen: bool,
+) -> dict[str, Any]:
     model_user_hits = 0
     model_recipe_hits = sum(
         1 for recipe_id in recommender.recipes if recipe_id in scorer.recipe_to_index
@@ -232,7 +262,17 @@ def _diagnose_bpr_top_k(
         if user_id in scorer.user_to_index:
             model_user_hits += 1
 
-        rec_ids = _bpr_top_k_for_user(recommender, scorer, user_id, top_k)
+        history_items = (
+            training_interactions["positives"].get(user_id, set())
+            | training_interactions["negatives"].get(user_id, set())
+        )
+        rec_ids = _bpr_top_k_for_user(
+            recommender,
+            scorer,
+            user_id,
+            top_k,
+            seen_recipe_ids=history_items if exclude_seen else None,
+        )
         if not rec_ids:
             no_score_users.append(user_id)
             continue
@@ -252,10 +292,6 @@ def _diagnose_bpr_top_k(
                 }
             )
 
-        history_items = (
-            training_interactions["positives"].get(user_id, set())
-            | training_interactions["negatives"].get(user_id, set())
-        )
         overlap = set(rec_ids) & history_items
         history_overlap_items += len(overlap)
         if overlap:
@@ -271,6 +307,7 @@ def _diagnose_bpr_top_k(
 
     return {
         "skipped": False,
+        "exclude_seen": exclude_seen,
         "model_users": len(scorer.user_to_index),
         "model_recipes": len(scorer.recipe_to_index),
         "evaluated_users_in_bpr_model": model_user_hits,
@@ -295,12 +332,12 @@ def _diagnose_bpr_top_k(
         "history_overlap_user_examples": overlap_user_examples,
     }
 
-
 def _bpr_top_k_for_user(
     recommender: DACHLLMRecommender,
     scorer: BPRScorer,
     user_id: int,
     top_k: int,
+    seen_recipe_ids: set[int] | None = None,
 ) -> list[int]:
     try:
         profile = recommender._load_user_profile(user_id)
@@ -309,6 +346,8 @@ def _bpr_top_k_for_user(
 
     scored: list[tuple[int, float]] = []
     for recipe_id in recommender.recipes:
+        if seen_recipe_ids and recipe_id in seen_recipe_ids:
+            continue
         if not recommender._passes_recipe_filters(recipe_id, profile, []):
             continue
         score = scorer.score(user_id, recipe_id)

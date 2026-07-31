@@ -64,27 +64,52 @@ DACH-LLMRec 当前采用“先过滤、再融合、再重排、最后解释”�
 
 默认菜谱综合分为：
 
-\[
+$$
 \begin{aligned}
 Score(u,r)=&0.22PreferenceScore(u,r)+0.22HealthGoalScore(u,r)\\
 &+0.16ContentScore(u,r)+0.15FeedbackScore(u,r)\\
 &+0.10SemanticScore(u,r)+0.10QualityScore(r)\\
 &+0.05DiversityBoost(r)
 \end{aligned}
-\]
+$$
+
+对应权重：
+
+| 证据项 | 权重 |
+| --- | ---: |
+| PreferenceScore(u,r) | 0.22 |
+| HealthGoalScore(u,r) | 0.22 |
+| ContentScore(u,r) | 0.16 |
+| FeedbackScore(u,r) | 0.15 |
+| SemanticScore(u,r) | 0.10 |
+| QualityScore(r) | 0.10 |
+| DiversityBoost(r) | 0.05 |
 
 其中，口味分来自用户口味向量与菜谱口味向量的余弦相似度；健康目标分来自 HCI 推荐菜谱的直接命中和推荐食材的间接命中；内容分衡量菜谱食材是否命中用户偏好食材；反馈分来自行为权重和可选 BPR 模型；语义分来自用户文本向量与菜谱文本向量的余弦相似度；质量分来自内容完整度和营养可信度；多样性分用于 Top-K 重排。
 
 如果未来补充了可靠的用户疾病/风险画像，或调用方显式传入疾病 ID，可启用疾病扩展公式：
 
-\[
+$$
 \begin{aligned}
 Score(u,r)=&0.18PreferenceScore(u,r)+0.18HealthGoalScore(u,r)\\
 &+0.16DiseaseScore(r)+0.14ContentScore(u,r)\\
 &+0.12FeedbackScore(u,r)+0.10SemanticScore(u,r)\\
 &+0.08QualityScore(r)+0.04DiversityBoost(r)
 \end{aligned}
-\]
+$$
+
+对应权重：
+
+| 证据项 | 权重 |
+| --- | ---: |
+| PreferenceScore(u,r) | 0.18 |
+| HealthGoalScore(u,r) | 0.18 |
+| DiseaseScore(r) | 0.16 |
+| ContentScore(u,r) | 0.14 |
+| FeedbackScore(u,r) | 0.12 |
+| SemanticScore(u,r) | 0.10 |
+| QualityScore(r) | 0.08 |
+| DiversityBoost(r) | 0.04 |
 
 疾病分数默认不启用，避免把疾病知识表误当成用户诊断信息。当前默认语义向量是本地哈希向量，不是真实大模型 embedding。
 

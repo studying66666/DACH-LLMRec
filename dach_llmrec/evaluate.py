@@ -232,8 +232,15 @@ def _bpr_only_for_user(
     if recommender.bpr_scorer is None:
         return []
     profile = recommender._load_user_profile(user_id)
+    seen_recipe_ids = {
+        recipe_id
+        for seen_user_id, recipe_id in recommender.recipe_feedback
+        if seen_user_id == user_id
+    }
     scored = []
     for recipe_id in recommender.recipes:
+        if recipe_id in seen_recipe_ids:
+            continue
         if not recommender._passes_recipe_filters(recipe_id, profile, []):
             continue
         score = recommender.bpr_scorer.score(user_id, recipe_id)

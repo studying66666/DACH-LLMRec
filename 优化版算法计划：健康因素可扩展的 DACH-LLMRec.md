@@ -37,7 +37,7 @@
 执行步骤：
 
 1. 数据读取：读取菜谱、食材、菜谱-食材关系、HCI 健康目标、HCI 推荐菜谱、HCI 推荐食材、口味知识、营养可信度、synthetic 用户画像和 synthetic 反馈。
-2. 用户画像：把用户口味偏好归一化到 \([-1,1]\)；把健康目标优先级转成权重 \(H_u(c)=1/priority_u(c)\)；再按 HCI 父子层级传播权重，父到子乘 0.8，子到父乘 0.5。
+2. 用户画像：把用户口味偏好归一化到 [-1,1]；把健康目标优先级转成权重 H_u(c)=1/priority_u(c)；再按 HCI 父子层级传播权重，父到子乘 0.8，子到父乘 0.5。
 3. 候选特征：菜谱食材权重按主料 1.0、辅料 0.5 计算；菜谱口味由“菜谱 -> 食材 -> 口味”统计得到；健康目标信号由直接推荐菜谱和间接推荐食材共同提供。
 4. 硬过滤：不可推荐菜谱、用户避免菜谱、包含用户避免食材的菜谱直接排除。后续显式启用疾病 ID 时，疾病禁忌菜谱和疾病禁忌食材也直接排除。
 5. 多证据打分：分别计算口味匹配、健康目标匹配、内容偏好、历史反馈、语义匹配、质量分和多样性增益。
@@ -47,36 +47,61 @@
 
 默认菜谱排序公式：
 
-\[
+$$
 \begin{aligned}
 Score(u,r)=&0.22PreferenceScore(u,r)+0.22HealthGoalScore(u,r)\\
 &+0.16ContentScore(u,r)+0.15FeedbackScore(u,r)\\
 &+0.10SemanticScore(u,r)+0.10QualityScore(r)\\
 &+0.05DiversityBoost(r)
 \end{aligned}
-\]
+$$
+
+对应权重：
+
+| 证据项 | 权重 |
+| --- | ---: |
+| PreferenceScore(u,r) | 0.22 |
+| HealthGoalScore(u,r) | 0.22 |
+| ContentScore(u,r) | 0.16 |
+| FeedbackScore(u,r) | 0.15 |
+| SemanticScore(u,r) | 0.10 |
+| QualityScore(r) | 0.10 |
+| DiversityBoost(r) | 0.05 |
 
 疾病扩展后的菜谱排序公式：
 
-\[
+$$
 \begin{aligned}
 Score(u,r)=&0.18PreferenceScore(u,r)+0.18HealthGoalScore(u,r)\\
 &+0.16DiseaseScore(r)+0.14ContentScore(u,r)\\
 &+0.12FeedbackScore(u,r)+0.10SemanticScore(u,r)\\
 &+0.08QualityScore(r)+0.04DiversityBoost(r)
 \end{aligned}
-\]
+$$
+
+对应权重：
+
+| 证据项 | 权重 |
+| --- | ---: |
+| PreferenceScore(u,r) | 0.18 |
+| HealthGoalScore(u,r) | 0.18 |
+| DiseaseScore(r) | 0.16 |
+| ContentScore(u,r) | 0.14 |
+| FeedbackScore(u,r) | 0.12 |
+| SemanticScore(u,r) | 0.10 |
+| QualityScore(r) | 0.08 |
+| DiversityBoost(r) | 0.04 |
 
 各分数含义：
 
-- \(PreferenceScore\)：用户口味向量与菜谱口味向量的余弦相似度，映射到 \([0,1]\)。
-- \(HealthGoalScore\)：HCI 推荐菜谱直接命中占 60%，菜谱所含食材的 HCI 间接命中占 40%。
-- \(ContentScore\)：用户偏好食材在菜谱食材中的加权覆盖程度。
-- \(FeedbackScore\)：行为事件权重经 sigmoid 归一化；加载 BPR 后，与 BPR 个性化分各占 50%。
-- \(SemanticScore\)：用户文本向量与菜谱文本向量的余弦相似度。当前默认是哈希向量，不是真实 LLM embedding。
-- \(QualityScore\)：内容完整度分乘以营养可信度分。
-- \(DiversityBoost\)：\(1\) 减去候选菜谱与已选菜谱在菜系、做法和主食材上的最大相似度。
-- \(DiseaseScore\)：仅显式启用疾病 ID 时使用，由疾病推荐菜谱和疾病推荐食材共同计算；疾病禁忌项在硬过滤阶段直接排除。
+- PreferenceScore：用户口味向量与菜谱口味向量的余弦相似度，映射到 [0,1]。
+- HealthGoalScore：HCI 推荐菜谱直接命中占 60%，菜谱所含食材的 HCI 间接命中占 40%。
+- ContentScore：用户偏好食材在菜谱食材中的加权覆盖程度。
+- FeedbackScore：行为事件权重经 sigmoid 归一化；加载 BPR 后，与 BPR 个性化分各占 50%。
+- SemanticScore：用户文本向量与菜谱文本向量的余弦相似度。当前默认是哈希向量，不是真实 LLM embedding。
+- QualityScore：内容完整度分乘以营养可信度分。
+- DiversityBoost：1 减去候选菜谱与已选菜谱在菜系、做法和主食材上的最大相似度。
+- DiseaseScore：仅显式启用疾病 ID 时使用，由疾病推荐菜谱和疾病推荐食材共同计算；疾病禁忌项在硬过滤阶段直接排除。
 
 ## LLM Usage
 
@@ -84,11 +109,13 @@ Score(u,r)=&0.18PreferenceScore(u,r)+0.18HealthGoalScore(u,r)\\
 
 语义向量在当前算法里只负责一个证据项：
 
-\[
-SemanticScore(u,x)=\frac{\cos(E_u,E_x)+1}{2}
-\]
+$$
+\begin{aligned}
+SemanticScore(u,x)=\\frac{\\cos(E_u,E_x)+1}{2}
+\end{aligned}
+$$
 
-其中 \(E_u\) 是用户画像文本向量，\(E_x\) 是菜谱或食材文本向量。该分数进入综合排序，但不会单独决定最终推荐。
+其中 E_u 是用户画像文本向量，E_x 是菜谱或食材文本向量。该分数进入综合排序，但不会单独决定最终推荐。
 
 后续如果接入真实 LLM 或中文 embedding 模型，可以替换三处能力：
 
@@ -98,11 +125,13 @@ SemanticScore(u,x)=\frac{\cos(E_u,E_x)+1}{2}
 
 论文级训练可以进一步扩展为多目标损失，但当前代码没有实现这些损失，不能写进已完成实验：
 
-\[
-L=L_{BPR}+\lambda_1L_{semantic}+\lambda_2L_{health}+\lambda_3L_{safety}+\lambda_4L_{reg}
-\]
+$$
+\begin{aligned}
+L=L_{BPR}+\\lambda_1L_{semantic}+\\lambda_2L_{health}+\\lambda_3L_{safety}+\\lambda_4L_{reg}
+\end{aligned}
+$$
 
-其中 \(L_{semantic}\) 表示语义对齐约束，\(L_{health}\) 表示健康目标排序约束，\(L_{safety}\) 表示安全违规惩罚，\(L_{reg}\) 表示正则项。当前实际已实现的是 BPR 隐式反馈学习和主排序公式融合。
+其中 $L_{semantic}$ 表示语义对齐约束，$L_{health}$ 表示健康目标排序约束，$L_{safety}$ 表示安全违规惩罚，$L_{reg}$ 表示正则项。当前实际已实现的是 BPR 隐式反馈学习和主排序公式融合。
 ## Interfaces
 
 推荐接口：
