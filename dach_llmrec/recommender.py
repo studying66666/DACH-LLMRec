@@ -51,6 +51,8 @@ class DACHLLMRecommender:
         self.recipes: dict[int, Recipe] = {}
         self.ingredients: dict[int, Ingredient] = {}
         self.recipe_ingredients: dict[int, dict[int, float]] = defaultdict(dict)
+        self.recipe_ingredient_sets: dict[int, set[int]] = defaultdict(set)
+        self.recipe_method_sets: dict[int, set[str]] = {}
         self.recipe_main_ingredients: dict[int, set[int]] = defaultdict(set)
         self.ingredient_tastes: dict[int, set[int]] = defaultdict(set)
         self.recipe_taste_vectors: dict[int, dict[int, float]] = {}
@@ -59,6 +61,7 @@ class DACHLLMRecommender:
         self.hci_parent: dict[int, int] = {}
         self.hci_children: dict[int, set[int]] = defaultdict(set)
         self.recipe_feedback: dict[tuple[int, int], float] = defaultdict(float)
+        self.ingredient_feedback_scores: dict[tuple[int, int], float] = {}
         self.recipe_nutrition_tier: dict[int, str] = {}
         self.disease_avoid_recipes: dict[int, set[int]] = defaultdict(set)
         self.disease_avoid_ingredients: dict[int, set[int]] = defaultdict(set)
@@ -93,11 +96,17 @@ class DACHLLMRecommender:
             raise ValueError("mode must be 'recipe' or 'ingredient'")
 
         profile = self._load_user_profile(user_id)
+        user_embedding = self.embedding_provider.embed(self._user_text(profile))
         disease_ids = self._extract_disease_ids(health_factors, enable_disease_constraints)
+        learned_scores = None
+        if mode == "recipe" and self.bpr_scorer is not None:
+            learned_scores = self.bpr_scorer.score_many(profile.user_id, list(self.recipes))
         if mode == "recipe":
-            items = self._recommend_recipes(profile, top_k, disease_ids)
+            items = self._recommend_recipes(
+                profile, top_k, disease_ids, user_embedding, learned_scores
+            )
         else:
-            items = self._recommend_ingredients(profile, top_k, disease_ids)
+            items = self._recommend_ingredients(profile, top_k, disease_ids, user_embedding)
         return {
             "user_id": user_id,
             "mode": mode,
@@ -153,6 +162,7 @@ class DACHLLMRecommender:
         self._load_hci_hierarchy()
         self._load_hci_links()
         self._load_feedback()
+        self._build_ingredient_feedback_scores()
         self._load_nutrition_tiers()
         self._load_disease_extension_tables()
 
@@ -177,6 +187,7 @@ class DACHLLMRecommender:
                 recommendable=int(row["recommendable"] or 0),
                 restriction_reasons=row["restriction_reasons"] or "",
             )
+            self.recipe_method_sets[recipe_id] = set(self.recipes[recipe_id].cooking_methods)
 
     def _load_ingredients(self) -> None:
         rows = self.conn.execute(
@@ -216,6 +227,7 @@ class DACHLLMRecommender:
             self.recipe_ingredients[recipe_id][ingredient_id] = max(
                 self.recipe_ingredients[recipe_id].get(ingredient_id, 0.0), weight
             )
+            self.recipe_ingredient_sets[recipe_id].add(ingredient_id)
             if weight >= 1.0:
                 self.recipe_main_ingredients[recipe_id].add(ingredient_id)
 
@@ -307,6 +319,21 @@ class DACHLLMRecommender:
             self.recipe_feedback[(int(row["user_id"]), int(row["recipe_id"]))] += (
                 FEEDBACK_WEIGHTS.get(event_type, 0.0)
             )
+
+    def _build_ingredient_feedback_scores(self) -> None:
+        totals: dict[tuple[int, int], float] = defaultdict(float)
+        counts: dict[tuple[int, int], int] = defaultdict(int)
+        for (user_id, recipe_id), _raw in self.recipe_feedback.items():
+            score = self._feedback_score(user_id, recipe_id)
+            for ingredient_id in self.recipe_ingredient_sets.get(recipe_id, ()):
+                key = (user_id, ingredient_id)
+                totals[key] += score
+                counts[key] += 1
+        self.ingredient_feedback_scores = {
+            key: totals[key] / counts[key]
+            for key in totals
+            if counts[key]
+        }
 
     def _load_nutrition_tiers(self) -> None:
         rows = self.conn.execute(
@@ -493,12 +520,16 @@ class DACHLLMRecommender:
         profile: UserProfile,
         top_k: int,
         disease_ids: list[int],
+        user_embedding: list[float] | None = None,
+        learned_scores: dict[int, float] | None = None,
     ) -> list[dict[str, Any]]:
         scored: list[dict[str, Any]] = []
         for recipe_id, recipe in self.recipes.items():
             if not self._passes_recipe_filters(recipe_id, profile, disease_ids):
                 continue
-            evidence = self._recipe_evidence(profile, recipe_id, disease_ids)
+            evidence = self._recipe_evidence(
+                profile, recipe_id, disease_ids, user_embedding, learned_scores
+            )
             weights = RECIPE_WEIGHTS_WITH_DISEASE if disease_ids else RECIPE_WEIGHTS
             score = self._weighted_score(evidence, weights)
             scored.append({"recipe_id": recipe_id, "score": score, "evidence": evidence})
@@ -527,9 +558,11 @@ class DACHLLMRecommender:
         profile: UserProfile,
         top_k: int,
         disease_ids: list[int],
+        user_embedding: list[float] | None = None,
     ) -> list[dict[str, Any]]:
         items = []
-        user_embedding = self.embedding_provider.embed(self._user_text(profile))
+        if user_embedding is None:
+            user_embedding = self.embedding_provider.embed(self._user_text(profile))
         for ingredient_id, ingredient in self.ingredients.items():
             if ingredient_id in profile.avoided_ingredients:
                 continue
@@ -584,7 +617,7 @@ class DACHLLMRecommender:
             return False
         if recipe_id in profile.avoided_recipes:
             return False
-        ingredients = set(self.recipe_ingredients.get(recipe_id, {}))
+        ingredients = self.recipe_ingredient_sets.get(recipe_id, set())
         if ingredients & profile.avoided_ingredients:
             return False
         for disease_id in disease_ids:
@@ -599,15 +632,20 @@ class DACHLLMRecommender:
         profile: UserProfile,
         recipe_id: int,
         disease_ids: list[int],
+        user_embedding: list[float] | None = None,
+        learned_scores: dict[int, float] | None = None,
     ) -> dict[str, float]:
         recipe = self.recipes[recipe_id]
-        user_embedding = self.embedding_provider.embed(self._user_text(profile))
+        if user_embedding is None:
+            user_embedding = self.embedding_provider.embed(self._user_text(profile))
         return {
             "preference_score": self._taste_score(profile, recipe_id),
             "health_goal_score": self._health_goal_score(profile, recipe_id),
             "disease_score": self._disease_score(recipe_id, disease_ids),
             "content_score": self._recipe_content_score(profile, recipe_id),
-            "feedback_score": self._feedback_score(profile.user_id, recipe_id),
+            "feedback_score": self._feedback_score(
+                profile.user_id, recipe_id, learned_scores.get(recipe_id) if learned_scores else None
+            ),
             "llm_alignment_score": _cosine01(
                 user_embedding, self._recipe_embedding(recipe)
             ),
@@ -685,7 +723,7 @@ class DACHLLMRecommender:
             )
 
         ingredient_scores = []
-        for ingredient_id in self.recipe_ingredients.get(recipe_id, {}):
+        for ingredient_id in self.recipe_ingredient_sets.get(recipe_id, set()):
             best = 0.0
             for hci_id, priority_weight in profile.health_goals.items():
                 best = max(
@@ -751,24 +789,24 @@ class DACHLLMRecommender:
             numerator += recipe_weight * profile.favored_ingredients.get(ingredient_id, 0.0)
         return _clip01(numerator / denominator)
 
-    def _feedback_score(self, user_id: int, recipe_id: int) -> float:
+    def _feedback_score(
+        self,
+        user_id: int,
+        recipe_id: int,
+        learned_score: float | None = None,
+    ) -> float:
         raw = self.recipe_feedback.get((user_id, recipe_id))
         event_score = 0.5 if raw is None else 1.0 / (1.0 + math.exp(-raw / 5.0))
-        if self.bpr_scorer is None:
+        if self.bpr_scorer is None and learned_score is None:
             return event_score
-        learned_score = self.bpr_scorer.score(user_id, recipe_id)
+        if learned_score is None and self.bpr_scorer is not None:
+            learned_score = self.bpr_scorer.score(user_id, recipe_id)
         if learned_score is None:
             return event_score
         return _clip01(0.5 * event_score + 0.5 * learned_score)
 
     def _ingredient_feedback_score(self, user_id: int, ingredient_id: int) -> float:
-        scores = []
-        for recipe_id, ingredients in self.recipe_ingredients.items():
-            if ingredient_id in ingredients and (user_id, recipe_id) in self.recipe_feedback:
-                scores.append(self._feedback_score(user_id, recipe_id))
-        if not scores:
-            return 0.5
-        return sum(scores) / len(scores)
+        return self.ingredient_feedback_scores.get((user_id, ingredient_id), 0.5)
 
     def _recipe_quality_score(self, recipe_id: int) -> float:
         recipe = self.recipes[recipe_id]
@@ -818,7 +856,7 @@ class DACHLLMRecommender:
         if not selected_recipe_ids:
             return 1.0
         recipe = self.recipes[recipe_id]
-        recipe_methods = set(recipe.cooking_methods)
+        recipe_methods = self.recipe_method_sets.get(recipe_id, set(recipe.cooking_methods))
         recipe_main = self.recipe_main_ingredients.get(recipe_id, set())
         max_similarity = 0.0
         for selected_id in selected_recipe_ids:
@@ -826,7 +864,10 @@ class DACHLLMRecommender:
             similarity = 0.0
             if recipe.cuisine_name and recipe.cuisine_name == selected.cuisine_name:
                 similarity += 0.4
-            similarity += 0.3 * _jaccard(recipe_methods, set(selected.cooking_methods))
+            similarity += 0.3 * _jaccard(
+                recipe_methods,
+                self.recipe_method_sets.get(selected_id, set(selected.cooking_methods)),
+            )
             similarity += 0.3 * _jaccard(
                 recipe_main, self.recipe_main_ingredients.get(selected_id, set())
             )

@@ -64,6 +64,38 @@ class BPRScorer:
         ) + self.user_bias[user_index] + self.item_bias[recipe_index]
         return torch.sigmoid(raw).item()
 
+    def score_many(
+        self,
+        user_id: int,
+        recipe_ids: list[int] | None = None,
+        exclude_recipe_ids: set[int] | None = None,
+    ) -> dict[int, float]:
+        user_index = self.user_to_index.get(user_id)
+        if user_index is None:
+            return {}
+        recipe_ids = recipe_ids or list(self.recipe_to_index)
+        filtered_recipe_ids: list[int] = []
+        candidate_indices: list[int] = []
+        for recipe_id in recipe_ids:
+            if exclude_recipe_ids and recipe_id in exclude_recipe_ids:
+                continue
+            recipe_index = self.recipe_to_index.get(recipe_id)
+            if recipe_index is None:
+                continue
+            filtered_recipe_ids.append(recipe_id)
+            candidate_indices.append(recipe_index)
+        if not filtered_recipe_ids:
+            return {}
+
+        device = self.recipe_embeddings.device
+        index_tensor = torch.as_tensor(candidate_indices, dtype=torch.long, device=device)
+        user_vec = self.user_embeddings[user_index].unsqueeze(0)
+        item_vecs = self.recipe_embeddings.index_select(0, index_tensor)
+        raw = (item_vecs * user_vec).sum(dim=1)
+        raw = raw + self.user_bias[user_index] + self.item_bias.index_select(0, index_tensor)
+        scores = torch.sigmoid(raw).tolist()
+        return {recipe_id: float(score) for recipe_id, score in zip(filtered_recipe_ids, scores)}
+
     def topk(
         self,
         user_id: int,

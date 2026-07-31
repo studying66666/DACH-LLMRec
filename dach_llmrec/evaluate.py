@@ -10,6 +10,7 @@ from typing import Any
 
 from .constants import FEEDBACK_WEIGHTS
 from .als import ALSScorer
+from .fusion import FusionScorer, fit_recipe_fusion_scorer
 from .itemknn import ItemKNNScorer
 from .paths import DEFAULT_DB_PATH
 from .recommender import DACHLLMRecommender
@@ -49,6 +50,7 @@ def evaluate(
             "itemknn",
             "als_only",
             "bpr_only",
+            "fusion_lr",
             "dach_no_health",
             "dach_no_llm",
             "dach_no_feedback",
@@ -56,6 +58,7 @@ def evaluate(
             "dach_full",
         ]
         results = {}
+        model_summaries: dict[str, Any] = {}
         for ranker in rankers:
             if ranker == "bpr_only" and not bpr_model_path:
                 results[ranker] = {"skipped": True, "reason": "bpr_model_path is required"}
@@ -63,10 +66,22 @@ def evaluate(
             recommender = DACHLLMRecommender(
                 db_path,
                 feedback_before=cutoff,
-                bpr_model_path=bpr_model_path if ranker in {"bpr_only", "dach_full", "dach_no_health", "dach_no_llm", "dach_no_feedback", "dach_no_diversity"} else None,
+                bpr_model_path=bpr_model_path if ranker in {"bpr_only", "fusion_lr", "dach_full", "dach_no_health", "dach_no_llm", "dach_no_feedback", "dach_no_diversity"} else None,
                 disabled_components=_disabled_components_for_ranker(ranker),
             )
             try:
+                fusion_scorer = None
+                if ranker == "fusion_lr":
+                    try:
+                        fusion_scorer, fusion_summary = fit_recipe_fusion_scorer(
+                            recommender=recommender,
+                            cutoff=cutoff,
+                            max_users=max_users,
+                        )
+                        model_summaries[ranker] = fusion_summary
+                    except ValueError as exc:
+                        results[ranker] = {"skipped": True, "reason": str(exc)}
+                        continue
                 results[ranker] = _evaluate_ranker(
                     recommender=recommender,
                     user_ids=user_ids,
@@ -74,6 +89,7 @@ def evaluate(
                     top_k=top_k,
                     ranker=ranker,
                     popularity=popularity,
+                    fusion_scorer=fusion_scorer,
                 )
             finally:
                 recommender.close()
@@ -87,6 +103,7 @@ def evaluate(
                 "boundary": "synthetic feedback simulation; not real-user validation",
             },
             "results": results,
+            "models": model_summaries,
         }
     finally:
         conn.close()
@@ -135,6 +152,7 @@ def _evaluate_ranker(
     top_k: int,
     ranker: str,
     popularity: list[int] | None = None,
+    fusion_scorer: FusionScorer | None = None,
 ) -> dict[str, float]:
     precision_values = []
     recall_values = []
@@ -190,6 +208,13 @@ def _evaluate_ranker(
             )
         elif ranker == "bpr_only":
             rec_ids = _bpr_only_for_user(recommender, user_id, top_k)
+        elif ranker == "fusion_lr":
+            rec_ids = _fusion_lr_for_user(
+                recommender,
+                fusion_scorer,
+                user_id,
+                top_k,
+            )
         else:
             items = recommender.recommend(user_id=user_id, top_k=top_k, mode="recipe")["items"]
             rec_ids = [item["item_id"] for item in items]
@@ -308,6 +333,39 @@ def _bpr_only_for_user(
         candidate_recipe_ids=candidate_recipe_ids,
         exclude_recipe_ids=seen_recipe_ids,
     )
+
+
+def _fusion_lr_for_user(
+    recommender: DACHLLMRecommender,
+    fusion_scorer: FusionScorer | None,
+    user_id: int,
+    top_k: int,
+) -> list[int]:
+    if fusion_scorer is None:
+        return []
+    profile = recommender._load_user_profile(user_id)
+    user_embedding = recommender.embedding_provider.embed(recommender._user_text(profile))
+    learned_scores = None
+    if recommender.bpr_scorer is not None:
+        learned_scores = recommender.bpr_scorer.score_many(user_id, list(recommender.recipes))
+    seen_recipe_ids = {
+        recipe_id
+        for seen_user_id, recipe_id in recommender.recipe_feedback
+        if seen_user_id == user_id
+    }
+    scored = []
+    for recipe_id, recipe in recommender.recipes.items():
+        if recipe_id in seen_recipe_ids:
+            continue
+        if not recommender._passes_recipe_filters(recipe_id, profile, []):
+            continue
+        evidence = recommender._recipe_evidence(
+            profile, recipe_id, [], user_embedding, learned_scores
+        )
+        score = fusion_scorer.score(evidence)
+        scored.append((recipe_id, score))
+    scored.sort(key=lambda item: item[1], reverse=True)
+    return [recipe_id for recipe_id, _ in scored[:top_k]]
 
 
 def _itemknn_for_user(

@@ -24,6 +24,7 @@ dach-llmrec-bpr = "dach_llmrec.bpr:main"
 dach-llmrec-bpr-diagnose = "dach_llmrec.diagnostics:main"
 dach-llmrec-demo-data = "dach_llmrec.demo_data:main"
 dach-llmrec-evaluate = "dach_llmrec.evaluate:main"
+dach-llmrec-diagnose = "dach_llmrec.diagnostics:main"
 dach-llmrec-run-all = "dach_llmrec.experiments.run_all:main"
 
 [tool.setuptools.packages.find]

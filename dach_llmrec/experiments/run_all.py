@@ -8,6 +8,7 @@ from typing import Any
 
 from dach_llmrec.bpr import train_bpr
 from dach_llmrec.demo_data import create_demo_database
+from dach_llmrec.diagnostics import diagnose_bpr
 from dach_llmrec.evaluate import evaluate
 from dach_llmrec.paths import DEFAULT_DB_PATH
 
@@ -53,6 +54,13 @@ def run_all(
         max_users=max_users,
         bpr_model_path=bpr_path if bpr_path.exists() else None,
     )
+    diagnostics = diagnose_bpr(
+        db_path=db_path,
+        cutoff=cutoff,
+        top_k=top_k,
+        max_users=max_users,
+        bpr_model_path=bpr_path if bpr_path.exists() else None,
+    )
 
     config = {
         "db_path": str(db_path),
@@ -69,6 +77,7 @@ def run_all(
     output = {
         "config": config,
         "bpr_summary": bpr_summary,
+        "diagnostics": diagnostics,
         "evaluation": eval_result,
     }
     (output_dir / "experiment.json").write_text(
@@ -78,6 +87,10 @@ def run_all(
     _write_metrics_csv(output_dir / "metrics.csv", eval_result["results"])
     (output_dir / "config.json").write_text(
         json.dumps(config, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (output_dir / "diagnostics.json").write_text(
+        json.dumps(diagnostics, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     return output
