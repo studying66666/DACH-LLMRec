@@ -7,7 +7,7 @@
 需要先明确边界：
 
 1. 当前用户画像和反馈来自 synthetic 表，只能称为模拟实验。
-2. 默认语义向量由 `HashEmbeddingProvider` 生成，是本地确定性哈希向量，不是真实大模型 embedding。
+2. 默认语义向量由 `HashEmbeddingProvider` 生成，是本地确定性哈希向量；现已支持真实中文 embedding（`SentenceTransformerEmbeddingProvider`，默认模型 `BAAI/bge-small-zh-v1.5`），通过 `embedding_provider='real'` 启用，二者共用同一接口。
 3. 疾病表默认不代表用户诊断；只有显式传入疾病 ID 并启用疾病约束时，疾病过滤和疾病分数才进入流程。
 4. 新增的 ALS、ItemKNN、Fusion LR 和 DACH 权重网格搜索主要用于离线评估和对比排序，不会改变 CLI 默认 `recommend()` 的可解释 DACH 排序路径。
 
@@ -245,7 +245,7 @@ $$
 SemanticScore(u,x)=\frac{\cos(E_u,E_x)+1}{2}
 $$
 
-其中 $x$ 可以是菜谱 $r$ 或食材 $i$。当前默认 provider 是本地哈希向量，不是真实 LLM embedding。
+其中 $x$ 可以是菜谱 $r$ 或食材 $i$。默认 provider 是本地哈希向量（`HashEmbeddingProvider`）；也可切换为真实中文 embedding（`SentenceTransformerEmbeddingProvider`，默认模型 `BAAI/bge-small-zh-v1.5`），并对编码结果做磁盘缓存。
 
 ### 6.6 质量分
 
@@ -524,17 +524,23 @@ $$
 | dach_no_llm | DACH 去掉语义分 |
 | dach_no_feedback | DACH 去掉反馈分 |
 | dach_no_diversity | DACH 去掉多样性 |
+| llmrec_aug_bpr | 用证据约束生成的增强边训练 BPR |
+| dach_no_semantic | DACH 关闭 LLM/语义证据项 |
+| dach_hash_embedding | DACH 强制使用 hash embedding |
+| dach_real_embedding | DACH 强制使用真实 embedding（需 embedding_provider=real） |
 | dach_full | 完整 DACH |
 
 评估指标包括 Precision@K、Recall@K、NDCG@K、HitRate@K、Coverage、Diversity 和 SafetyViolationRate。
+
+其中 `dach_no_semantic`、`dach_hash_embedding`、`dach_real_embedding` 构成 embedding 消融组，用于对比语义向量来源（关闭 / hash / 真实）对指标的影响；`dach_real_embedding` 在 `embedding_provider` 不为 `real` 时会被跳过并记录原因。一键实验中这组结果单独写入 `embedding_ablation.json`。
 
 由于反馈来自 synthetic 表，结果只能作为模拟实验或工程验收，不能作为真实用户有效性结论。
 
 ## 11. 当前实现状态
 
-已经实现：默认 DACH 可解释推荐、食谱和食材双任务推荐、疾病约束 opt-in 扩展、HashEmbeddingProvider 离线语义向量、BPR 训练/偏置项/批量打分/Top-K、ItemKNN、隐式反馈 ALS、Logistic Regression 证据融合、DACH 权重网格搜索、content/content_feedback/popularity baseline、DACH 消融实验、BPR 诊断和一键实验输出、常见 Top-K 指标和安全违规率。
+已经实现：默认 DACH 可解释推荐、食谱和食材双任务推荐、疾病约束 opt-in 扩展、HashEmbeddingProvider 离线语义向量、SentenceTransformerEmbeddingProvider 真实中文 embedding（默认 BAAI/bge-small-zh-v1.5）与 embedding 磁盘缓存、dach_no_semantic / dach_hash_embedding / dach_real_embedding 三个 embedding 消融入口、BPR 训练/偏置项/批量打分/Top-K、ItemKNN、隐式反馈 ALS、Logistic Regression 证据融合、DACH 权重网格搜索、content/content_feedback/popularity baseline、DACH 消融实验、BPR 诊断和一键实验输出、常见 Top-K 指标和安全违规率。
 
-仍未实现或不能声称完成：真实大模型 embedding、大模型生成解释、大模型 reranker、LightGCN/GAT/DeepFM/Wide&Deep 等深度或图模型、真实用户实验、基于真实疾病诊断的个性化推荐、临床营养或疾病治疗建议、多随机种子显著性检验和置信区间报告、生产级 API 服务。
+仍未实现或不能声称完成：大模型生成解释、大模型 reranker、LightGCN/GAT/DeepFM/Wide&Deep 等深度或图模型、真实用户实验、基于真实疾病诊断的个性化推荐、临床营养或疾病治疗建议、多随机种子显著性检验和置信区间报告、生产级 API 服务。
 
 ## 12. 总结
 

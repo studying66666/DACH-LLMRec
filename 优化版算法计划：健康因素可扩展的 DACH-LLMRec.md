@@ -2,7 +2,7 @@
 
 ## Summary
 
-目标是设计一个适合当前数据库、后续又能平滑加入疾病因素的食材/食谱推荐算法。当前主模型使用 **HCI 健康目标 + 口味 + 食材/菜谱关系 + 模拟反馈 + 可替换语义向量接口**。当前默认语义向量是本地哈希向量，不是真实 LLM embedding；疾病相关表暂不进入默认主排序，但预留 `HealthFactor` 扩展接口，后续补充用户疾病画像后可小改接入。
+目标是设计一个适合当前数据库、后续又能平滑加入疾病因素的食材/食谱推荐算法。当前主模型使用 **HCI 健康目标 + 口味 + 食材/菜谱关系 + 模拟反馈 + 可替换语义向量接口**。当前默认语义向量是本地哈希向量（HashEmbeddingProvider），不是真实 LLM embedding；现已接入真实中文 embedding（SentenceTransformerEmbeddingProvider，默认模型 BAAI/bge-small-zh-v1.5），可在 `embedding_provider='real'` 启用，二者共用同一接口；疾病相关表暂不进入默认主排序，但预留 `HealthFactor` 扩展接口，后续补充用户疾病画像后可小改接入。
 
 当前已核验的数据事实：有可推荐菜谱 4066 条、规范食材 7815 条、菜谱-食材关系 12608 条、模拟用户 500 个、模拟反馈事件 23776 条；用户画像没有可靠疾病字段；疾病表能连接少量食材/菜谱，但没有可靠用户-疾病关系。
 
@@ -98,7 +98,7 @@ $$
 - HealthGoalScore：HCI 推荐菜谱直接命中占 60%，菜谱所含食材的 HCI 间接命中占 40%。
 - ContentScore：用户偏好食材在菜谱食材中的加权覆盖程度。
 - FeedbackScore：行为事件权重经 sigmoid 归一化；加载 BPR 后，与 BPR 个性化分各占 50%。
-- SemanticScore：用户文本向量与菜谱文本向量的余弦相似度。当前默认是哈希向量，不是真实 LLM embedding。
+- SemanticScore：用户文本向量与菜谱文本向量的余弦相似度。默认是哈希向量（HashEmbeddingProvider），也可切换为真实中文 embedding（SentenceTransformerEmbeddingProvider，默认模型 BAAI/bge-small-zh-v1.5）。
 - QualityScore：内容完整度分乘以营养可信度分。
 - DiversityBoost：1 减去候选菜谱与已选菜谱在菜系、做法和主食材上的最大相似度。
 - DiseaseScore：仅显式启用疾病 ID 时使用，由疾病推荐菜谱和疾病推荐食材共同计算；疾病禁忌项在硬过滤阶段直接排除。
@@ -149,7 +149,7 @@ $$
 
 ## LLM Usage
 
-当前实现没有直接调用大模型 API。代码只保留了可替换的 embedding provider 接口，默认使用本地 HashEmbeddingProvider 生成确定性文本向量，便于无网络、无 API key 的复现。
+当前实现没有直接调用大模型 API。代码保留了可替换的 embedding provider 接口，默认使用本地 HashEmbeddingProvider 生成确定性文本向量，便于无网络、无 API key 的复现；现已新增 SentenceTransformerEmbeddingProvider 作为真实中文 embedding provider（默认模型 BAAI/bge-small-zh-v1.5，带磁盘缓存），通过 `embedding_provider='real'` 启用。语义向量来源对比通过 `dach_no_semantic` / `dach_hash_embedding` / `dach_real_embedding` 三个消融入口完成，已接入推荐、评估、增强边生成和一键实验，其中 `dach_real_embedding` 需要 `embedding_provider='real'`，否则跳过。
 
 语义向量在当前算法里只负责一个证据项：
 
@@ -248,16 +248,20 @@ recommend(
   * ItemKNN
   * ALS-only
   * BPR-only
+  * LLMRec Augmented BPR
   * Logistic Fusion
   * DACH Grid Weight Search
+  * DACH embedding 消融（no semantic / hash / real）
   * Full DACH-LLMRec
 * 消融实验:
 
   * 去掉健康目标图。
-  * 去掉 LLM 语义对齐。
+  * 去掉 LLM 语义对齐（dach_no_semantic）。
   * 去掉异构反馈权重。
   * 去掉质量分。
   * 去掉多样性重排。
+  * 强制使用 hash embedding（dach_hash_embedding）。
+  * 强制使用真实 embedding（dach_real_embedding，需 embedding_provider=real）。
 * 疾病扩展实验：
 
   * 只有在补充可靠 `user -> disease/risk` 数据后启用。

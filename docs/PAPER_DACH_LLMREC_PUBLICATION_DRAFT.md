@@ -2,7 +2,7 @@
 
 ## 摘要
 
-膳食推荐不仅需要预测用户对食谱和食材的兴趣，还需要同时处理健康目标、禁忌食材、内容质量、营养可信度和推荐解释等约束。针对这一问题，本文基于当前项目代码实现，提出 DACH-LLMRec，一种面向食谱与食材推荐的健康目标约束多证据融合排序方法。系统以 SQLite 膳食数据库为基础，构建用户口味偏好、健康目标、偏好食材、避免项和隐式反馈画像；在排序前执行不可推荐菜谱、用户避免菜谱、用户避免食材以及可选疾病禁忌的硬过滤；在排序阶段融合口味匹配、健康目标匹配、内容偏好、历史反馈、离线语义相似度、内容质量和多样性增益等证据；并通过 PyTorch 实现的 Bayesian Personalized Ranking（BPR）模型从 synthetic 隐式反馈中学习用户-菜谱潜在偏好。当前实现支持食谱推荐、食材推荐、BPR 训练与加载、baseline 对比、消融实验和时间切分离线评估。需要强调的是，当前默认语义向量为确定性哈希向量，并非真实大模型 embedding；当前用户画像和反馈来自 synthetic 表，只能支持模拟实验；疾病因素仅在显式传入疾病 ID 时启用，不能解释为真实用户诊断。基于已运行的 demo 验收，项目 5 个 pytest 用例通过，Python 语法编译通过，demo 规模一键实验能够生成 BPR 模型、评估 JSON 和指标 CSV。本文将该系统定位为一个可复现、可解释、健康目标可扩展的膳食推荐研究原型。
+膳食推荐不仅需要预测用户对食谱和食材的兴趣，还需要同时处理健康目标、禁忌食材、内容质量、营养可信度和推荐解释等约束。针对这一问题，本文基于当前项目代码实现，提出 DACH-LLMRec，一种面向食谱与食材推荐的健康目标约束多证据融合排序方法。系统以 SQLite 膳食数据库为基础，构建用户口味偏好、健康目标、偏好食材、避免项和隐式反馈画像；在排序前执行不可推荐菜谱、用户避免菜谱、用户避免食材以及可选疾病禁忌的硬过滤；在排序阶段融合口味匹配、健康目标匹配、内容偏好、历史反馈、离线语义相似度、内容质量和多样性增益等证据；并通过 PyTorch 实现的 Bayesian Personalized Ranking（BPR）模型从 synthetic 隐式反馈中学习用户-菜谱潜在偏好。当前实现支持食谱推荐、食材推荐、BPR 训练与加载、baseline 对比、消融实验和时间切分离线评估。需要强调的是，代码默认语义向量为确定性哈希向量（HashEmbeddingProvider），并非真实大模型输出；现已集成真实中文 embedding provider（SentenceTransformerEmbeddingProvider，默认 BAAI/bge-small-zh-v1.5，带磁盘缓存），可通过 embedding_provider='real' 启用，但本文默认实验仍采用 hash 以保证可复现；当前用户画像和反馈来自 synthetic 表，只能支持模拟实验；疾病因素仅在显式传入疾病 ID 时启用，不能解释为真实用户诊断。基于已运行的 demo 验收，项目 19 个 pytest 用例通过（含真实 embedding provider 的向量返回、磁盘缓存与缺失依赖提示用例，以及三个 embedding 消融入口的评估与 run_all 写入 embedding_ablation 用例），Python 语法编译通过，demo 规模一键实验能够生成 BPR 模型、评估 JSON 和指标 CSV。本文将该系统定位为一个可复现、可解释、健康目标可扩展的膳食推荐研究原型。
 
 **关键词**：膳食推荐；健康目标约束；混合推荐；隐式反馈；BPR；可解释推荐；多样性重排
 
@@ -18,7 +18,7 @@
 2. 将不可推荐项、避免菜谱、避免食材和显式疾病禁忌作为排序前硬过滤，避免安全约束被偏好分数抵消。
 3. 构建了由口味、健康目标、内容、反馈、语义相似度、质量和多样性组成的多证据加权排序公式。
 4. 实现了基于 synthetic 隐式反馈的 BPR 训练、模型保存和推荐阶段分数融合。
-5. 实现了 popularity、content、bpr_only 以及多种 DACH 消融版本的时间切分评估流程。
+5. 实现了 popularity、content、bpr_only 以及多种 DACH 消融版本、三个 embedding 消融入口（dach_no_semantic、dach_hash_embedding、dach_real_embedding）的时间切分评估流程。
 6. 通过模板化解释返回每个推荐项的命中因素和证据字段，避免生成无依据的医学结论。
 
 本文不声称已经完成真实大模型推荐、真实用户实验、临床营养建议、图神经网络推荐或生产级服务，因为这些内容没有在当前代码中实现。
@@ -33,7 +33,7 @@
 
 ## 3. 数据与系统边界
 
-当前代码读取的核心数据表包括菜谱表 `norm_recipe_v1`、食材表 `norm_ingredient_v1`、菜谱-食材关系表 `norm_recipe_ingredient_v1`、营养可信度表 `norm_recipe_nutrition_feature_eligibility_v1`、synthetic 用户画像与反馈表、健康目标知识表、口味知识表和疾病扩展知识表。用户画像和反馈来自 synthetic 表，因此实验只能称为模拟实验，不能写成真实用户实验。疾病知识表不等于用户诊断表。代码没有读取可靠的 `user -> disease` 关系，疾病约束默认关闭；只有调用方显式传入疾病 ID 并开启 `enable_disease_constraints` 时才使用疾病过滤和疾病推荐分。默认语义向量由本地 `HashEmbeddingProvider` 生成，该向量实现用于离线复现和接口占位，不是真实大模型输出。
+当前代码读取的核心数据表包括菜谱表 `norm_recipe_v1`、食材表 `norm_ingredient_v1`、菜谱-食材关系表 `norm_recipe_ingredient_v1`、营养可信度表 `norm_recipe_nutrition_feature_eligibility_v1`、synthetic 用户画像与反馈表、健康目标知识表、口味知识表和疾病扩展知识表。用户画像和反馈来自 synthetic 表，因此实验只能称为模拟实验，不能写成真实用户实验。疾病知识表不等于用户诊断表。代码没有读取可靠的 `user -> disease` 关系，疾病约束默认关闭；只有调用方显式传入疾病 ID 并开启 `enable_disease_constraints` 时才使用疾病过滤和疾病推荐分。默认语义向量由本地 `HashEmbeddingProvider` 生成，该向量实现用于离线复现和接口占位，不是真实大模型输出；代码现已集成 `SentenceTransformerEmbeddingProvider` 作为真实中文 embedding provider（默认 BAAI/bge-small-zh-v1.5，带磁盘缓存），通过 embedding_provider='real' 启用。
 
 ## 4. 方法
 

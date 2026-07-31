@@ -10,7 +10,9 @@ DACH-LLMRec 是一个面向食材/食谱推荐的研究型算法项目。它基�
 - 用户口味、食材偏好、历史反馈、内容质量、多样性综合排序；
 - PyTorch BPR（Bayesian Personalized Ranking）隐式反馈训练，已加入用户偏置、物品偏置和批量打分；
 - ItemKNN 物品协同过滤、隐式反馈 ALS、Logistic Regression 证据融合、DACH 权重网格搜索；
-- 大模型/embedding 接口预留；
+- 真实中文 embedding 接入：`SentenceTransformerEmbeddingProvider`（默认模型 `BAAI/bge-small-zh-v1.5`），与 `HashEmbeddingProvider` 组成 `hash` / `real` 两套 provider；
+- 真实 embedding 带磁盘缓存（`artifacts/embedding_cache`），避免重复编码；
+- 大模型/embedding 接口预留，可在不联网、无 API key 时以本地哈希向量运行；
 - 疾病因素扩展接口，默认不把疾病表当作用户诊断；
 - popularity、content、content_feedback、bpr_only、itemknn、als_only、fusion_lr、dach_grid baseline 和 DACH 消融实验；
 - 无完整数据库时的 demo 数据复现。
@@ -99,7 +101,7 @@ Score(u,r)=&0.18PreferenceScore(u,r)+0.18HealthGoalScore(u,r)\\
 \end{aligned}
 $$
 
-疾病分数默认不启用，避免把疾病知识表误当成用户诊断信息。当前默认语义向量是本地哈希向量，不是真实大模型 embedding。
+疾病分数默认不启用，避免把疾病知识表误当成用户诊断信息。当前默认语义向量是本地哈希向量（`HashEmbeddingProvider`），不是真实大模型 embedding；可切换为真实中文 embedding（`SentenceTransformerEmbeddingProvider`，默认模型 `BAAI/bge-small-zh-v1.5`，带磁盘缓存）。
 ## 3. 主要使用的数据表
 
 菜谱和食材：
@@ -249,6 +251,7 @@ content_feedback
 itemknn
 als_only
 bpr_only
+llmrec_aug_bpr
 fusion_lr
 dach_grid
 dach_no_health
@@ -256,6 +259,14 @@ dach_no_llm
 dach_no_feedback
 dach_no_diversity
 dach_full
+```
+
+embedding 消融方法（对比语义向量来源对指标的影响，已接入 `run_all`）：
+
+```text
+dach_no_semantic      # 关闭 LLM/语义证据项
+dach_hash_embedding   # 强制使用 hash provider
+dach_real_embedding   # 强制使用 real provider（需 --embedding-provider real，否则跳过并记录原因）
 ```
 
 评估指标：
@@ -269,6 +280,21 @@ Coverage
 Diversity
 SafetyViolationRate
 ```
+
+推荐、评估、增强边生成和一键实验现在共享统一的 embedding 参数（`--embedding-provider {hash,real}`、`--embedding-model`、`--embedding-device {auto,cpu,cuda}`、`--embedding-cache-dir`）。启用真实 embedding 的评估示例：
+
+```bash
+python -m dach_llmrec.evaluate \
+  --db handoff_database_completed_20260729/dietrecommendation_no_empty_enhanced.sqlite \
+  --embedding-provider real \
+  --embedding-model BAAI/bge-small-zh-v1.5 \
+  --embedding-device auto \
+  --embedding-cache-dir artifacts/embedding_cache \
+  --cutoff "2026-06-01 00:00:00" --top-k 10 --max-users 500 \
+  --bpr-model artifacts/dach_bpr_gpu.pt --output artifacts/dach_real_embedding_eval.json
+```
+
+一键实验传入 `--embedding-provider real` 时，`run_all` 会在 `config.json` / `experiment.json` 写入 `embedding_config`，并单独写出 `embedding_ablation.json`（包含 `dach_no_semantic`、`dach_hash_embedding`、`dach_real_embedding` 三组指标）。
 
 ## 8. 项目结构
 
@@ -284,7 +310,7 @@ dach_llmrec/
   diagnostics.py     # BPR 数据和推荐诊断
   demo_data.py       # 最小 demo SQLite 数据库生成
   constants.py       # 权重和常量
-  embeddings.py      # embedding 接口和 HashEmbeddingProvider
+  embeddings.py      # embedding 接口、HashEmbeddingProvider 和 SentenceTransformerEmbeddingProvider（真实中文 embedding + 磁盘缓存）
   models.py          # Recipe / Ingredient / UserProfile 数据模型
   paths.py           # 默认数据库路径发现
   experiments/       # 一键实验 runner
@@ -301,27 +327,41 @@ pytest -q
 python -m compileall -q dach_llmrec tests
 ```
 
-## 10. 大模型接入边界
+## 10. 大模型 / embedding 接入边界
 
-当前默认的 `HashEmbeddingProvider` 是离线确定性文本向量，不是真实大模型 embedding。它的作用是让项目在没有 API key、没有网络的情况下也能完整运行。
+项目现在同时支持两类语义向量 provider，二者实现同一个 `EmbeddingProvider` 接口（`embed(text) -> list[float]`）：
 
-后续可以替换为真实 embedding 模型：
+- `HashEmbeddingProvider`（默认）：离线确定性文本向量，不依赖网络或 API key，保证无网络环境完整可运行。
+- `SentenceTransformerEmbeddingProvider`（真实中文 embedding）：基于 `sentence-transformers`，默认模型 `BAAI/bge-small-zh-v1.5`，支持 `auto`/`cpu`/`cuda` 设备选择，并对编码结果做磁盘缓存（`artifacts/embedding_cache`）以避免重复计算。
 
-```python
-class MyEmbeddingProvider:
-    def embed(self, text: str) -> list[float]:
-        ...
+安装真实 embedding 可选依赖：
+
+```bash
+pip install -e ".[embeddings]"
 ```
 
-使用方式：
+启用真实 embedding 的两种方式：
+
+命令行（推荐 / 评估 / 增强边生成 / 一键实验均已接入统一参数）：
+
+```bash
+python -m dach_llmrec.cli \
+  --db handoff_database_completed_20260729/dietrecommendation_no_empty_enhanced.sqlite \
+  --user-id 1 --top-k 5 --mode recipe \
+  --embedding-provider real --embedding-model BAAI/bge-small-zh-v1.5 --embedding-device auto
+```
+
+代码内直接构造：
 
 ```python
-from dach_llmrec import DACHLLMRecommender
+from dach_llmrec import DACHLLMRecommender, build_embedding_provider
 
 recommender = DACHLLMRecommender(
     "handoff_database_completed_20260729/dietrecommendation_no_empty_enhanced.sqlite",
-    embedding_provider=MyEmbeddingProvider(),
+    embedding_provider=build_embedding_provider("real", model="BAAI/bge-small-zh-v1.5"),
 )
 ```
+
+环境注意：`sentence-transformers` 需要与其 `torch` 版本匹配的 `torchvision`（例如 torch 2.6.0 对应 torchvision 0.21.0）；若导入 `sentence_transformers` 报错，请先对齐 torch / torchvision 版本，或使用 `--embedding-provider hash`。
 
 推荐解释必须基于已计算证据，不能编造医学结论。
