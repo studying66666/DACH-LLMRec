@@ -1,0 +1,29 @@
+dossier: "DACH-LLMRec 投稿升级"
+generated: "2026-07-31"
+run_type: "基于用户给定文献、网络核验和本地项目检查的筛查级选题评估"
+recall:
+  tool: "手动网络检索 + 本地项目检查"
+  query_phrasings: 18
+  dossier_confidence: medium
+  note: "非系统综述；目前发现的最强直接竞争工作是 KDD 2025 的 MOPI-HFRS。"
+gaps:
+  - id: G1
+    name: "长期约束忠实营养推荐"
+    statement: "将 DACH-LLMRec 升级为序列感知、长期健康约束的食谱推荐框架：把协同/序列用户表征蒸馏为 LLM 可读的语义状态，在多餐周期内联合优化偏好、健康、多样性与安全，并且只基于已验证模型证据生成解释。"
+    type: A
+    open: partially-occupied
+    open_confidence: medium
+    dead_end_status: genuinely-open
+    dead_end_evidence: "近邻工作分别覆盖协同 LLMRec、序列 LLMRec、图增强健康推荐、约束调度和忠实解释，但本轮筛查未发现把这四者完整结合到食谱/营养推荐中的工作。"
+    contribution_type: problem-solving
+    feasibility: feasible-with-effort
+    verdict: conditional-go
+    verdict_reason: "只有在项目补充真实外部交互数据、序列建模、硬营养约束和解释忠实性评估后，才值得作为一区论文方向推进。"
+open_questions:
+  - id: Q1
+    text: "Food.com/Recipe1M+ 与本地 DACH 数据库能否在法律和技术上对齐为可复现 benchmark，并获得可信营养标签？"
+  - id: Q2
+    text: "能否在不作临床声明的前提下获得小规模真实用户或营养师评价？"
+  - id: Q3
+    text: "主投目标应优先选择 Information Fusion、Expert Systems with Applications、Knowledge-Based Systems 还是 IEEE TKDE？"
+

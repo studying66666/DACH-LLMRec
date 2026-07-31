@@ -303,7 +303,7 @@ $$
 sim(r,s)=0.4C(r,s)+0.3J(M_r,M_s)+0.3J(G_r,G_s)
 $$
 
-其中 $C(r,s)$ 表示菜系是否相同，$M_r$ 是做法集合，$G_r$ 是主食材集合，$J$ 是 Jaccard 相似度。
+其中 $(Cr,s)$ 表示菜系是否相同，$M_r$ 是做法集合，$G_r$ 是主食材集合， $J$ 是 Jaccard 相似度。
 
 $$
 DiversityBoost(r)=1-\max_{s\in Selected}sim(r,s)

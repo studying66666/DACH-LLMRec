@@ -14,6 +14,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+embeddings = [
+  "sentence-transformers>=2.2",
+]
 dev = [
   "pytest>=8.0",
 ]
@@ -25,9 +28,9 @@ dach-llmrec-bpr-diagnose = "dach_llmrec.diagnostics:main"
 dach-llmrec-demo-data = "dach_llmrec.demo_data:main"
 dach-llmrec-evaluate = "dach_llmrec.evaluate:main"
 dach-llmrec-grid-search = "dach_llmrec.weight_search:main"
+dach-llmrec-augment = "dach_llmrec.llmrec_aug:main"
 dach-llmrec-diagnose = "dach_llmrec.diagnostics:main"
 dach-llmrec-run-all = "dach_llmrec.experiments.run_all:main"
 
 [tool.setuptools.packages.find]
 include = ["dach_llmrec*"]
-

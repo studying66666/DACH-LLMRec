@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from .constants import FEEDBACK_WEIGHTS
+from .embeddings import (
+    DEFAULT_EMBEDDING_CACHE_DIR,
+    DEFAULT_REAL_EMBEDDING_MODEL,
+    build_embedding_provider,
+)
 from .als import ALSScorer
 from .fusion import FusionScorer, fit_recipe_fusion_scorer
 from .itemknn import ItemKNNScorer
@@ -26,7 +31,12 @@ def evaluate(
     top_k: int = 10,
     max_users: int | None = 50,
     bpr_model_path: str | Path | None = None,
+    augmented_bpr_model_path: str | Path | None = None,
     rankers: list[str] | None = None,
+    embedding_provider: str = "hash",
+    embedding_model: str = DEFAULT_REAL_EMBEDDING_MODEL,
+    embedding_device: str = "auto",
+    embedding_cache_dir: str | Path | None = DEFAULT_EMBEDDING_CACHE_DIR,
 ) -> dict[str, Any]:
     """Evaluate on synthetic feedback after cutoff.
 
@@ -51,7 +61,11 @@ def evaluate(
             "itemknn",
             "als_only",
             "bpr_only",
+            "llmrec_aug_bpr",
             "fusion_lr",
+            "dach_no_semantic",
+            "dach_hash_embedding",
+            "dach_real_embedding",
             "dach_grid",
             "dach_no_health",
             "dach_no_llm",
@@ -65,12 +79,40 @@ def evaluate(
             if ranker == "bpr_only" and not bpr_model_path:
                 results[ranker] = {"skipped": True, "reason": "bpr_model_path is required"}
                 continue
-            recommender = DACHLLMRecommender(
-                db_path,
-                feedback_before=cutoff,
-                bpr_model_path=bpr_model_path if ranker in {"bpr_only", "fusion_lr", "dach_grid", "dach_full", "dach_no_health", "dach_no_llm", "dach_no_feedback", "dach_no_diversity"} else None,
-                disabled_components=_disabled_components_for_ranker(ranker),
+            if ranker == "llmrec_aug_bpr" and not augmented_bpr_model_path:
+                results[ranker] = {"skipped": True, "reason": "augmented_bpr_model_path is required"}
+                continue
+            if ranker == "dach_real_embedding" and embedding_provider != "real":
+                results[ranker] = {
+                    "skipped": True,
+                    "reason": "embedding_provider=real is required to run real embedding ablation",
+                }
+                continue
+            selected_bpr_model_path = _bpr_model_for_ranker(
+                ranker,
+                bpr_model_path=bpr_model_path,
+                augmented_bpr_model_path=augmented_bpr_model_path,
             )
+            selected_embedding_provider = _embedding_provider_name_for_ranker(
+                ranker, embedding_provider
+            )
+            try:
+                selected_provider = build_embedding_provider(
+                    embedding_provider=selected_embedding_provider,
+                    embedding_model=embedding_model,
+                    embedding_device=embedding_device,
+                    embedding_cache_dir=embedding_cache_dir,
+                )
+                recommender = DACHLLMRecommender(
+                    db_path,
+                    embedding_provider=selected_provider,
+                    feedback_before=cutoff,
+                    bpr_model_path=selected_bpr_model_path,
+                    disabled_components=_disabled_components_for_ranker(ranker),
+                )
+            except Exception as exc:
+                results[ranker] = {"skipped": True, "reason": str(exc)}
+                continue
             try:
                 fusion_scorer = None
                 grid_scorer = None
@@ -116,6 +158,13 @@ def evaluate(
                 "top_k": top_k,
                 "evaluated_users": len(user_ids),
                 "bpr_model": str(bpr_model_path) if bpr_model_path else None,
+                "augmented_bpr_model": str(augmented_bpr_model_path) if augmented_bpr_model_path else None,
+                "embedding_config": {
+                    "provider": embedding_provider,
+                    "model": embedding_model,
+                    "device": embedding_device,
+                    "cache_dir": str(embedding_cache_dir) if embedding_cache_dir else None,
+                },
                 "boundary": "synthetic feedback simulation; not real-user validation",
             },
             "results": results,
@@ -223,7 +272,7 @@ def _evaluate_ranker(
                 top_k,
                 als_candidate_recipe_ids or [],
             )
-        elif ranker == "bpr_only":
+        elif ranker in {"bpr_only", "llmrec_aug_bpr"}:
             rec_ids = _bpr_only_for_user(recommender, user_id, top_k)
         elif ranker == "fusion_lr":
             rec_ids = _fusion_lr_for_user(
@@ -265,10 +314,40 @@ def _evaluate_ranker(
     }
 
 
+def _bpr_model_for_ranker(
+    ranker: str,
+    bpr_model_path: str | Path | None,
+    augmented_bpr_model_path: str | Path | None,
+) -> str | Path | None:
+    if ranker == "llmrec_aug_bpr":
+        return augmented_bpr_model_path
+    if ranker in {
+        "bpr_only",
+        "fusion_lr",
+        "dach_grid",
+        "dach_full",
+        "dach_no_health",
+        "dach_no_llm",
+        "dach_no_feedback",
+        "dach_no_diversity",
+    }:
+        return bpr_model_path
+    return None
+
+
+def _embedding_provider_name_for_ranker(ranker: str, embedding_provider: str) -> str:
+    if ranker == "dach_hash_embedding":
+        return "hash"
+    if ranker == "dach_real_embedding":
+        return "real"
+    return embedding_provider
+
+
 def _disabled_components_for_ranker(ranker: str) -> set[str]:
     mapping = {
         "dach_no_health": {"health"},
         "dach_no_llm": {"llm"},
+        "dach_no_semantic": {"llm"},
         "dach_no_feedback": {"feedback"},
         "dach_no_diversity": {"diversity"},
     }
@@ -341,6 +420,7 @@ def _bpr_only_for_user(
 ) -> list[int]:
     if recommender.bpr_scorer is None:
         return []
+    profile = recommender._load_user_profile(user_id)
     seen_recipe_ids = {
         recipe_id
         for seen_user_id, recipe_id in recommender.recipe_feedback
@@ -350,6 +430,7 @@ def _bpr_only_for_user(
         recipe_id
         for recipe_id in recommender.recipes
         if recipe_id in recommender.bpr_scorer.recipe_to_index
+        and recommender._passes_recipe_filters(recipe_id, profile, [])
     ]
     return recommender.bpr_scorer.topk(
         user_id=user_id,
@@ -357,7 +438,6 @@ def _bpr_only_for_user(
         candidate_recipe_ids=candidate_recipe_ids,
         exclude_recipe_ids=seen_recipe_ids,
     )
-
 
 def _fusion_lr_for_user(
     recommender: DACHLLMRecommender,
@@ -520,6 +600,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--max-users", type=int, default=50)
     parser.add_argument("--bpr-model", default=None, help="Optional trained BPR .pt artifact")
+    parser.add_argument("--augmented-bpr-model", default=None, help="Optional augmented BPR .pt artifact")
+    parser.add_argument("--embedding-provider", choices=["hash", "real"], default="hash")
+    parser.add_argument("--embedding-model", default=DEFAULT_REAL_EMBEDDING_MODEL)
+    parser.add_argument("--embedding-device", choices=["auto", "cpu", "cuda"], default="auto")
+    parser.add_argument("--embedding-cache-dir", default=str(DEFAULT_EMBEDDING_CACHE_DIR))
     parser.add_argument("--output", default=None, help="Optional JSON output path")
     parser.add_argument(
         "--rankers",
@@ -533,7 +618,12 @@ def main(argv: list[str] | None = None) -> int:
         top_k=args.top_k,
         max_users=args.max_users,
         bpr_model_path=args.bpr_model,
+        augmented_bpr_model_path=args.augmented_bpr_model,
         rankers=args.rankers.split(",") if args.rankers else None,
+        embedding_provider=args.embedding_provider,
+        embedding_model=args.embedding_model,
+        embedding_device=args.embedding_device,
+        embedding_cache_dir=args.embedding_cache_dir,
     )
     if args.output:
         output_path = Path(args.output)

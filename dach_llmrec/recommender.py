@@ -15,7 +15,13 @@ from .constants import (
     RECIPE_WEIGHTS,
     RECIPE_WEIGHTS_WITH_DISEASE,
 )
-from .embeddings import EmbeddingProvider, HashEmbeddingProvider
+from .embeddings import (
+    DEFAULT_EMBEDDING_CACHE_DIR,
+    DEFAULT_REAL_EMBEDDING_MODEL,
+    EmbeddingProvider,
+    HashEmbeddingProvider,
+    build_embedding_provider,
+)
 from .models import Ingredient, Recipe, UserProfile
 from .paths import DEFAULT_DB_PATH
 
@@ -983,7 +989,6 @@ class DACHLLMRecommender:
             return f"推荐“{ingredient.name}”是因为它通过了避免食材过滤，并在综合排序中得分较高。"
         parts = "、".join(matched)
         return f"推荐“{ingredient.name}”是因为它通过了避免食材过滤，并匹配了{parts}等已计算证据。"
-
     def _extract_disease_ids(
         self,
         health_factors: list[dict[str, Any]] | None,
@@ -1075,6 +1080,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mode", choices=["recipe", "ingredient"], default="recipe")
     parser.add_argument("--validate", action="store_true", help="Run validation instead")
     parser.add_argument("--bpr-model", default=None, help="Optional trained BPR .pt artifact")
+    parser.add_argument("--embedding-provider", choices=["hash", "real"], default="hash")
+    parser.add_argument("--embedding-model", default=DEFAULT_REAL_EMBEDDING_MODEL)
+    parser.add_argument("--embedding-device", choices=["auto", "cpu", "cuda"], default="auto")
+    parser.add_argument("--embedding-cache-dir", default=str(DEFAULT_EMBEDDING_CACHE_DIR))
     parser.add_argument(
         "--disease-id",
         action="append",
@@ -1084,7 +1093,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    recommender = DACHLLMRecommender(args.db, bpr_model_path=args.bpr_model)
+    embedding_provider = build_embedding_provider(
+        embedding_provider=args.embedding_provider,
+        embedding_model=args.embedding_model,
+        embedding_device=args.embedding_device,
+        embedding_cache_dir=args.embedding_cache_dir,
+    )
+    recommender = DACHLLMRecommender(
+        args.db,
+        embedding_provider=embedding_provider,
+        bpr_model_path=args.bpr_model,
+    )
     try:
         if args.validate:
             output = recommender.validate(user_id=args.user_id, top_k=args.top_k)

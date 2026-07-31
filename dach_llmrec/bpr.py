@@ -169,6 +169,8 @@ def train_bpr(
     learning_rate: float = 0.01,
     seed: int = 42,
     device: str = "auto",
+    augmented_edges_path: str | Path | None = None,
+    augmented_min_confidence: float = 0.0,
 ) -> dict[str, Any]:
     """Train a BPR model from synthetic implicit feedback."""
 
@@ -180,6 +182,11 @@ def train_bpr(
     conn.row_factory = sqlite3.Row
     try:
         interactions = _load_training_interactions(conn, cutoff)
+        augmentation_summary = _merge_augmented_positive_edges(
+            interactions,
+            augmented_edges_path=augmented_edges_path,
+            min_confidence=augmented_min_confidence,
+        )
         user_ids = sorted(interactions["positives"])
         recipe_ids = _load_candidate_recipes(conn)
         recipe_id_set = set(recipe_ids)
@@ -247,6 +254,7 @@ def train_bpr(
                 "device": str(selected_device),
                 "boundary": "trained from synthetic feedback only",
                 "bias_terms": True,
+                "augmented_edges": augmentation_summary,
             },
             "losses": losses,
         }
@@ -258,6 +266,7 @@ def train_bpr(
             "triples": len(triples),
             "device": str(selected_device),
             "losses": losses,
+            "augmented_edges": augmentation_summary,
             "boundary": "synthetic feedback only; not real-user validation",
         }
     finally:
@@ -297,6 +306,45 @@ def _load_training_interactions(conn: sqlite3.Connection, cutoff: str) -> dict[s
         elif FEEDBACK_WEIGHTS.get(event_type, 0.0) > 1.0:
             positives[user_id].add(recipe_id)
     return {"positives": positives, "negatives": negatives}
+
+
+def _merge_augmented_positive_edges(
+    interactions: dict[str, dict[int, set[int]]],
+    augmented_edges_path: str | Path | None,
+    min_confidence: float,
+) -> dict[str, Any]:
+    if augmented_edges_path is None:
+        return {"enabled": False, "path": None, "loaded_edges": 0, "added_positive_edges": 0}
+    path = Path(augmented_edges_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    edges = payload.get("edges", [])
+    added = 0
+    skipped_low_confidence = 0
+    skipped_invalid = 0
+    for edge in edges:
+        try:
+            user_id = int(edge["user_id"])
+            recipe_id = int(edge["recipe_id"])
+            confidence = float(edge.get("confidence", 0.0))
+        except (KeyError, TypeError, ValueError):
+            skipped_invalid += 1
+            continue
+        if confidence < min_confidence:
+            skipped_low_confidence += 1
+            continue
+        if recipe_id not in interactions["positives"].get(user_id, set()):
+            interactions["positives"][user_id].add(recipe_id)
+            added += 1
+    return {
+        "enabled": True,
+        "path": str(path),
+        "min_confidence": min_confidence,
+        "loaded_edges": len(edges),
+        "added_positive_edges": added,
+        "skipped_low_confidence": skipped_low_confidence,
+        "skipped_invalid": skipped_invalid,
+        "boundary": "augmented edges are pseudo-positive training signals",
+    }
 
 
 def _load_candidate_recipes(conn: sqlite3.Connection) -> list[int]:
@@ -357,6 +405,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--learning-rate", type=float, default=0.01)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    parser.add_argument("--augmented-edges", default=None, help="Optional LLMRec-style edges JSON")
+    parser.add_argument("--augmented-min-confidence", type=float, default=0.0)
     parser.add_argument("--summary-output", default=None, help="Optional JSON summary path")
     args = parser.parse_args(argv)
     result = train_bpr(
@@ -369,6 +419,8 @@ def main(argv: list[str] | None = None) -> int:
         learning_rate=args.learning_rate,
         seed=args.seed,
         device=args.device,
+        augmented_edges_path=args.augmented_edges,
+        augmented_min_confidence=args.augmented_min_confidence,
     )
     if args.summary_output:
         summary_path = Path(args.summary_output)
